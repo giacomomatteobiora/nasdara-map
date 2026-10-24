@@ -119,15 +119,53 @@ void ScanHeights()
 	CloseFile(f);
 }
 
+// Every object whose model path looks like power infrastructure: "shape x y z yaw" (deduplicated later in Python).
+// Grid sweep at 40 m; GetObjectsAtPosition is a 3D sphere, so radius 50 also catches tall towers and wires.
+void ScanPowerlines()
+{
+	FileHandle f = OpenFile("$profile:powerlines.txt", FileMode.WRITE);
+	float size = GetGame().GetWorld().GetWorldSize();
+	float step = 40;
+	int hits = 0;
+	array<Object> objs = new array<Object>;
+	for (float z = step / 2; z < size; z += step)
+	{
+		for (float x = step / 2; x < size; x += step)
+		{
+			objs.Clear();
+			GetGame().GetObjectsAtPosition(Vector(x, GetGame().SurfaceY(x, z), z), 50, objs, null);
+			foreach (Object o : objs)
+			{
+				string shape = o.GetShapeName();
+				shape.ToLower();
+				if (shape.Contains("power") || shape.Contains("powline") || shape.Contains("pole") || shape.Contains("wire") || shape.Contains("pylon"))
+				{
+					vector op = o.GetPosition();
+					vector ori = o.GetOrientation();
+					FPrintln(f, shape + " " + op[0] + " " + op[1] + " " + op[2] + " " + ori[0]);
+					hits++;
+				}
+			}
+		}
+	}
+	FPrintln(f, "SCAN_DONE " + hits);
+	CloseFile(f);
+}
+
 void main()
 {
 	int t0 = TickCount(0);
-	ScanNames();
-	Print("[MAPSCAN] names done");
-	ScanBuildings();
-	Print("[MAPSCAN] buildings done");
-	ScanHeights();
-	Print("[MAPSCAN] heights done, ticks=" + TickCount(t0));
+	// $profile:powerlines_only -> skip the (already done) names/buildings/heights scans
+	if (!FileExist("$profile:powerlines_only"))
+	{
+		ScanNames();
+		Print("[MAPSCAN] names done");
+		ScanBuildings();
+		Print("[MAPSCAN] buildings done");
+		ScanHeights();
+		Print("[MAPSCAN] heights done, ticks=" + TickCount(t0));
+	}
+	ScanPowerlines();
+	Print("[MAPSCAN] powerlines done, ticks=" + TickCount(t0));
 	GetGame().RequestExit(0);
 }
-

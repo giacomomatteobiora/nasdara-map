@@ -4,11 +4,13 @@ vehicles/events/spawns.json: {"<sub-type>": [[x, z, typeIndex], ...], ..., "_typ
 buildings.json: {"usages": [...], "types": [[class, minX, minZ, maxX, maxZ], ...],
                  "b": [[x, z, yawDeg, typeIndex, usageBitmask], ...]}  (one entry per building)
 names.json: [[name, type, x, z], ...]
+powerlines.json: {"lines": [{"k": "vhv"|"hv", "p": [[x, z], ...]}], "poles": [[x, z, kind], ...]}
 
 Building footprints, yaw and place names come from the one-off server scan (tools/mapscan_init.c):
 run `build_data.py scan-input` first, then the scan, then `build_data.py`.
 """
 import json
+import math
 import os
 import statistics
 import sys
@@ -128,6 +130,102 @@ def spawns():
     layer.save("spawns")
 
 
+# power models from the scan -> line kind and max span (m); towers are drawn as poles, wire spans only as lines
+POWER = {
+    "power_vhv_tower_noproxy": ("vhv", 420, True), "power_vhv_tower_dam": ("vhv", 420, True),
+    "power_vhv_end": ("vhv", 420, True),
+    "power_hv3_tower1": ("hv", 90, True), "power_hv3_tower2": ("hv", 90, True), "power_hv3_tower2_dam": ("hv", 90, True),
+    # wire spans hang between the hv3 towers (a span centre sits ~25 m from each tower): same network
+    "power_wire_50": ("hv", 90, False), "power_wire_50_main": ("hv", 90, False),
+    "power_wiretel_50_main": ("hv", 90, False), "power_pole_wood6_h": ("hv", 90, True),
+}
+
+
+def polylines(edges):
+    """Join undirected edges into node chains, breaking at junctions (degree != 2)."""
+    adj = defaultdict(set)
+    for a, b in edges:
+        adj[a].add(b)
+        adj[b].add(a)
+    seen, chains = set(), []
+
+    def walk(start, nxt):
+        chain = [start, nxt]
+        seen.add((min(start, nxt), max(start, nxt)))
+        while len(adj[nxt]) == 2:
+            following = next(n for n in adj[nxt] if n != chain[-2])
+            e = (min(nxt, following), max(nxt, following))
+            if e in seen:
+                break
+            seen.add(e)
+            chain.append(following)
+            nxt = following
+        return chain
+
+    for n in sorted(adj, key=lambda n: len(adj[n]) == 2):  # start at ends/junctions, loops last
+        for m in adj[n]:
+            if (min(n, m), max(n, m)) not in seen:
+                chains.append(walk(n, m))
+    return chains
+
+
+def powerlines():
+    """Chain towers / wire spans into lines: each support links to its nearest neighbour ahead and behind
+    along its own yaw (lines bend gently, so allow 30 degrees), within the kind's max span."""
+    pts = {}
+    for line in open(f"{SCAN}/powerlines.txt"):
+        p = line.split()
+        if len(p) != 5:
+            continue
+        model = p[0].rsplit("\\", 1)[-1].removesuffix(".p3d")
+        if model in POWER:
+            pts.setdefault(POWER[model][0], []).append((float(p[1]), float(p[3]), float(p[4]), model))
+    # the parallel wires of one span (and stacked copies) sit within a few metres: keep one per span
+    for kind, raw in pts.items():
+        kept, grid = [], defaultdict(list)
+        for n in raw:
+            key = (int(n[0] // 6), int(n[1] // 6))
+            near = [grid[(key[0] + a, key[1] + b)] for a in (-1, 0, 1) for b in (-1, 0, 1)]
+            if not any(math.hypot(m[0] - n[0], m[1] - n[1]) < 6 for cellpts in near for m in cellpts):
+                grid[key].append(n)
+                kept.append(n)
+        pts[kind] = kept
+    out, poles = [], []
+    for kind in ("vhv", "hv"):
+        nodes = pts.get(kind, [])
+        span = max(POWER[n[3]][1] for n in nodes)
+        cell = defaultdict(list)
+        for i, (x, z, _, _) in enumerate(nodes):
+            cell[(int(x // span), int(z // span))].append(i)
+        edges = set()
+        for i, (x, z, yaw, model) in enumerate(nodes):
+            if POWER[model][2]:
+                poles.append([round(x), round(z), kind])
+            fx, fz = math.sin(math.radians(yaw)), math.cos(math.radians(yaw))
+            best = {1: None, -1: None}
+            for cx in range(int(x // span) - 1, int(x // span) + 2):
+                for cz in range(int(z // span) - 1, int(z // span) + 2):
+                    for j in cell[(cx, cz)]:
+                        dx, dz = nodes[j][0] - x, nodes[j][1] - z
+                        d = math.hypot(dx, dz)
+                        if j == i or d < 5 or d > span:
+                            continue
+                        along = (dx * fx + dz * fz) / d
+                        if abs(along) < math.cos(math.radians(30)):
+                            continue
+                        side = 1 if along > 0 else -1
+                        if best[side] is None or d < best[side][0]:
+                            best[side] = (d, j)
+            for b in best.values():
+                if b:
+                    edges.add((min(i, b[1]), max(i, b[1])))
+        chains = polylines(edges)
+        out += [{"k": kind, "p": [[round(nodes[i][0]), round(nodes[i][1])] for i in c]} for c in chains]
+        print("powerlines", kind, len(nodes), "supports/spans,", len(edges), "links,", len(chains), "lines")
+    with open(f"{OUT}/powerlines.json", "w") as f:
+        json.dump({"lines": out, "poles": poles}, f, separators=(",", ":"))
+
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["scan-input"]:
         scan_input()
@@ -137,3 +235,4 @@ if __name__ == "__main__":
     names()
     events()
     spawns()
+    powerlines()

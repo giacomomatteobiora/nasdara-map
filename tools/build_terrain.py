@@ -16,16 +16,12 @@ SCAN = os.path.expanduser("~/DayZ-Badlands-1.30/DayZServer/profiles-mapscan")
 SIZE = 8192                       # output px (2 m/px) -> terrain zooms 0..5
 PX = WORLD / SIZE
 
-# hypsometric tint: (fraction of land height range, colour); mixed with blurred satellite ground colour
-STOPS = [
-    (0.00, (196, 186, 150)), (0.25, (184, 168, 124)), (0.45, (170, 140, 100)),
-    (0.65, (146, 116, 88)), (0.82, (138, 130, 122)), (1.00, (236, 232, 226)),
-]
-GROUND_MIX = 0.55
+# grey/white minimal relief: light grey valleys -> near-white peaks, hill shading and contours on top
+LOW, HIGH = np.array([226, 226, 222], np.float32), np.array([250, 250, 248], np.float32)
 WATER = np.array([74, 140, 196], np.float32)
 CONTOUR_MINOR, CONTOUR_MAJOR = 10, 50
-CONTOUR_COLOUR = np.array([70, 48, 30], np.float32)
-GRID_COLOUR = np.array([255, 255, 255], np.float32)
+CONTOUR_COLOUR = np.array([110, 110, 110], np.float32)
+GRID_COLOUR = np.array([150, 150, 150], np.float32)
 
 
 def load_heights():
@@ -55,9 +51,8 @@ def hillshade(gx, gy):
 
 def tint(h, land):
     lo, hi = np.percentile(h[land], [0.5, 99.8])
-    t = np.clip((h - lo) / (hi - lo), 0, 1)
-    xs = [s for s, _ in STOPS]
-    return np.stack([np.interp(t, xs, [c[i] for _, c in STOPS]).astype(np.float32) for i in range(3)], -1)
+    t = np.clip((h - lo) / (hi - lo), 0, 1)[..., None]
+    return LOW + (HIGH - LOW) * t
 
 
 def contour_alpha(h, slope_px, step, width):
@@ -65,19 +60,6 @@ def contour_alpha(h, slope_px, step, width):
     d = np.abs(h - np.round(h / step) * step) / np.maximum(slope_px, 1e-3)
     flat_fade = np.clip(slope_px / 0.04, 0, 1)  # no blobs on flattened ground that sits exactly on a level
     return np.clip(width / 2 + 0.5 - d, 0, 1) * flat_fade
-
-
-def ground_colour():
-    """Blurred satellite colour (from the z2 tiles, 16 m/px) so sand, rock and fields keep their real tone."""
-    tiles = os.path.join(os.path.dirname(__file__), "..", "site", "tiles", "sat", "2")
-    sat = Image.new("RGB", (1024, 1024))
-    for x in range(4):
-        for y in range(4):
-            sat.paste(Image.open(f"{tiles}/{x}/{y}.jpg"), (x * 256, y * 256))
-    sat = sat.resize((256, 256), Image.LANCZOS).resize((SIZE, SIZE), Image.BICUBIC)
-    g = np.asarray(sat, np.float32)
-    grey = g.mean(-1, keepdims=True)
-    return np.clip(grey + (g - grey) * 1.35, 0, 255) * 1.12  # a bit more saturated and lighter
 
 
 def blend(img, mask, colour, alpha):
@@ -93,22 +75,22 @@ def main():
     water = resize(w4) > 0.5
     del h4, w4
 
-    img = tint(h, ~water) * (1 - GROUND_MIX) + ground_colour() * GROUND_MIX
+    img = tint(h, ~water)
     gy, gx = np.gradient(h, PX)  # rows go south, so gy is -dz/dnorth
-    img *= (0.45 + 0.75 * hillshade(gx, gy))[..., None]
+    img *= (0.6 + 0.45 * hillshade(gx, gy))[..., None]
     slope_px = np.hypot(gx, gy) * PX  # metres of height per pixel
     del gx, gy
     blend(img, water, WATER, 0.85)
 
     land = ~water
-    blend(img, contour_alpha(h, slope_px, CONTOUR_MINOR, 1.0) * land, CONTOUR_COLOUR, 0.3)
-    blend(img, contour_alpha(h, slope_px, CONTOUR_MAJOR, 1.8) * land, CONTOUR_COLOUR, 0.6)
+    blend(img, contour_alpha(h, slope_px, CONTOUR_MINOR, 1.0) * land, CONTOUR_COLOUR, 0.25)
+    blend(img, contour_alpha(h, slope_px, CONTOUR_MAJOR, 1.8) * land, CONTOUR_COLOUR, 0.5)
     del h, slope_px
 
     grid = np.zeros((SIZE, SIZE), bool)
     step = int(1000 / PX)
     grid[::step, :] = grid[:, ::step] = True
-    blend(img, grid, GRID_COLOUR, 0.35)
+    blend(img, grid, GRID_COLOUR, 0.3)
 
     out = Image.fromarray(np.clip(img, 0, 255).astype(np.uint8))
     del img

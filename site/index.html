@@ -22,6 +22,15 @@
         <label><input type="radio" name="base" value="terrain"> Terrain</label>
       </div>
     </header>
+    <section id="loot" aria-label="Loot finder">
+      <h2>Loot finder</h2>
+      <div class="loot-row">
+        <input id="loot-q" list="loot-list" type="search" placeholder="Item or category, e.g. AKM" autocomplete="off" spellcheck="false">
+        <button id="loot-clear" type="button" aria-label="Clear loot search" hidden>✕</button>
+      </div>
+      <datalist id="loot-list"></datalist>
+      <div id="loot-res" aria-live="polite"></div>
+    </section>
     <div id="layers"></div>
     <footer>Fan-made · map data © Bohemia Interactive · not affiliated</footer>
   </aside>
