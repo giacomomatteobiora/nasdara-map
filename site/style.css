@@ -73,10 +73,41 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 
 @media (max-width: 640px) {
   #panel-toggle { display: block; }
-  #panel { top: 60px; left: 16px; right: 16px; bottom: auto; max-height: calc(100% - 120px); width: auto; display: none; }
+  #panel { top: 60px; left: 16px; right: 16px; bottom: auto; max-height: calc(100% - 120px); width: auto; display: none; background: #1c1915; }
   #panel.open { display: flex; }
   #coords { left: 16px; bottom: 16px; }
 }
 
 /* hide hairline seams between tiles at fractional zoom levels */
 .leaflet-container img.leaflet-tile { mix-blend-mode: normal; width: 256.6px !important; height: 256.6px !important; }
+
+/* buildings canvas and place names never take clicks (the map click handler hit-tests buildings) */
+.building-canvas, .leaflet-labels-pane { pointer-events: none; }
+.swatch-icon { width: 16px; height: 16px; flex: none; }
+.swatch.text { border-radius: 2px; height: 3px; border: 0; }
+
+.leaflet-popup-content .tags { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
+.leaflet-popup-content .tag {
+  display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px 1px 5px;
+  border: 1px solid var(--line); border-radius: 10px; font-size: 12px;
+}
+.leaflet-popup-content .tag i { width: 8px; height: 8px; border-radius: 50%; }
+
+/* place names */
+.place { white-space: nowrap; pointer-events: none; }
+.place span {
+  display: block; transform: translate(-50%, -50%);
+  color: #fff; font-weight: 600; font-size: 12px; letter-spacing: 0.02em;
+  text-shadow: 0 0 3px #000, 0 0 2px #000, 0 1px 2px #000;
+}
+.place.lbl-city span { font-size: 15px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
+.place.capital span { font-size: 18px; color: #ffe7a8; }
+.place.lbl-village span { font-size: 13px; color: #f4eedf; }
+.place.lbl-local span { font-size: 11px; font-weight: 500; font-style: italic; color: #e6dcc4; }
+.place.lbl-terrain span { font-size: 11px; font-weight: 500; font-style: italic; color: #b9dcff; }
+#map[data-lz="0"] .place { display: none; }
+#map[data-lz="0"] .place.capital { display: block; }
+#map[data-lz="1"] .place.lbl-village,
+#map[data-lz="1"] .place.lbl-local, #map[data-lz="1"] .place.lbl-terrain,
+#map[data-lz="2"] .place.lbl-local, #map[data-lz="2"] .place.lbl-terrain { display: none; }
+.place.clash { visibility: hidden; }
