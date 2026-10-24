@@ -137,3 +137,18 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
 #loot-res .spots button::before { content: counter(spot) "."; color: var(--accent); font-variant-numeric: tabular-nums; min-width: 1.4em; }
 #loot-res .spots button:hover { background: rgba(255, 255, 255, 0.07); }
 #loot-res .spots .count { white-space: nowrap; }
+#loot-res .spots button.ev span:first-child { font-style: italic; }
+#loot-res .legend { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 11px; color: var(--muted); }
+#loot-res .legend i {
+  flex: 1; height: 6px; border-radius: 3px;
+  background: linear-gradient(90deg, rgba(40, 120, 255, 0.5), rgb(0, 220, 220), rgb(255, 230, 0), rgb(255, 40, 20));
+}
+#loot-res .note { font-size: 11px; opacity: 0.8; }
+
+/* building popup loot breakdown */
+.leaflet-popup-content .find { margin: 4px 0; color: #7cfc00; font-size: 12px; }
+.leaflet-popup-content .loot-cats { display: flex; flex-wrap: wrap; gap: 4px 10px; margin: 6px 0 2px; font-size: 12px; color: var(--muted); }
+.leaflet-popup-content .loot-cats b { color: var(--text); }
+.leaflet-popup-content .loot-items { margin: 2px 0 4px; padding: 0; list-style: none; font-size: 12px; min-width: 210px; }
+.leaflet-popup-content .loot-items li { display: flex; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line); padding: 1px 0; }
+.leaflet-popup-content .loot-items b { font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }

@@ -152,9 +152,113 @@ void ScanPowerlines()
 	CloseFile(f);
 }
 
+// Top-down silhouette of one instance per building class: rays every 0.5 m over the collision box (model space),
+// a cell is filled when the building's view geometry is among the ray's hits. Also writes the model-space ce_center
+// (CE loot points in mapgroupproto are relative to it; same fallback as Object.GetCenter()).
+// Input $profile:shapes_in.txt: "class x y z". Output per class: "class x0 z0 step nx nz cx cy cz" + nz rows of 0/1.
+void ScanShapes()
+{
+	FileHandle inp = OpenFile("$profile:shapes_in.txt", FileMode.READ);
+	FileHandle f = OpenFile("$profile:shapes.txt", FileMode.WRITE);
+	string line;
+	int done = 0;
+	float step = 0.5;
+	while (FGets(inp, line) > 0)
+	{
+		array<string> parts = new array<string>;
+		line.Split(" ", parts);
+		if (parts.Count() < 4)
+			continue;
+		string cls = parts[0];
+		cls.ToLower();
+		vector pos = Vector(parts[1].ToFloat(), parts[2].ToFloat(), parts[3].ToFloat());
+		Object o = FindBuilding(pos, cls, 2);
+		if (!o)
+			o = FindBuilding(pos, cls, 8);
+		if (!o)
+		{
+			FPrintln(f, parts[0] + " MISS");
+			continue;
+		}
+		vector mm[2];
+		if (!o.GetCollisionBox(mm))
+			o.ClippingInfo(mm);
+		vector c = "0 0.2 0";
+		if (o.MemoryPointExists("ce_center"))
+			c = o.GetMemoryPointPos("ce_center");
+		float x0 = mm[0][0] - 1;
+		float z0 = mm[0][2] - 1;
+		int nx = Math.Ceil((mm[1][0] - mm[0][0] + 2) / step);
+		int nz = Math.Ceil((mm[1][2] - mm[0][2] + 2) / step);
+		FPrintln(f, parts[0] + " " + x0 + " " + z0 + " " + step + " " + nx + " " + nz + " " + c[0] + " " + c[1] + " " + c[2]);
+		vector hit, dir;
+		int comp;
+		set<Object> res = new set<Object>;
+		for (int iz = 0; iz < nz; iz++)
+		{
+			string row = "";
+			float lz = z0 + (iz + 0.5) * step;
+			for (int ix = 0; ix < nx; ix++)
+			{
+				float lx = x0 + (ix + 0.5) * step;
+				vector top = o.ModelToWorld(Vector(lx, mm[1][1] + 3, lz));
+				vector bottom = o.ModelToWorld(Vector(lx, mm[0][1] - 1, lz));
+				res.Clear();
+				// the ray also hits the ground, so the cell counts only when the building itself is among the hits
+				DayZPhysics.RaycastRV(top, bottom, hit, dir, comp, res, null, null, false, false, ObjIntersectView);
+				if (res.Find(o) != -1)
+					row += "1";
+				else
+					row += "0";
+			}
+			FPrintln(f, row);
+		}
+		done++;
+	}
+	FPrintln(f, "SCAN_DONE " + done);
+	CloseFile(inp);
+	CloseFile(f);
+}
+
+// Localised display names for item classes ($profile:items_in.txt, one class per line).
+void ScanItemNames()
+{
+	FileHandle inp = OpenFile("$profile:items_in.txt", FileMode.READ);
+	FileHandle f = OpenFile("$profile:itemnames.txt", FileMode.WRITE);
+	string line;
+	TStringArray roots = {"CfgVehicles", "CfgWeapons", "CfgMagazines", "CfgAmmo"};
+	while (FGets(inp, line) > 0)
+	{
+		line.TrimInPlace();
+		foreach (string root : roots)
+		{
+			string path = root + " " + line;
+			if (GetGame().ConfigIsExisting(path))
+			{
+				string name;
+				GetGame().ConfigGetText(path + " displayName", name);
+				FPrintln(f, line + "\t" + name);
+				break;
+			}
+		}
+	}
+	FPrintln(f, "SCAN_DONE");
+	CloseFile(inp);
+	CloseFile(f);
+}
+
 void main()
 {
 	int t0 = TickCount(0);
+	if (FileExist("$profile:shapes_only"))
+	{
+		ScanItemNames();
+		Print("[MAPSCAN] item names done");
+		ScanShapes();
+		Print("[MAPSCAN] shapes done, ticks=" + TickCount(t0));
+		GetGame().RequestExit(0);
+		return;
+	}
 	// $profile:powerlines_only -> skip the (already done) names/buildings/heights scans
 	if (!FileExist("$profile:powerlines_only"))
 	{

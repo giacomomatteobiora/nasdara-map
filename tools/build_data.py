@@ -58,14 +58,25 @@ def placed_groups():
 
 
 def scan_input():
-    """Building list the server scan reads: index, class, x y z."""
+    """Inputs the server scan reads: every building (index, class, x y z), one building per class for the shape
+    scan (class x y z), and the item classes whose display names it looks up."""
+    groups = placed_groups()
     with open(f"{SCAN}/buildings_in.txt", "w") as f:
-        for i, g in enumerate(placed_groups()):
+        for i, g in enumerate(groups):
             f.write(f'{i} {g.get("name")} {g.get("pos")}\n')
+    first = {}
+    for g in groups:
+        first.setdefault(g.get("name"), g.get("pos"))
+    with open(f"{SCAN}/shapes_in.txt", "w") as f:
+        for name, pos in first.items():
+            f.write(f"{name} {pos}\n")
+    with open(f"{SCAN}/items_in.txt", "w") as f:
+        for t in ET.parse(f"{MISSION}/db/types.xml").getroot():
+            f.write(t.get("name") + "\n")
 
 
 def buildings():
-    usages = {g.get("name"): [u.get("name") for u in g.findall("usage")]
+    usages = {g.get("name").lower(): [u.get("name") for u in g.findall("usage")]
               for g in ET.parse(f"{MISSION}/mapgroupproto.xml").getroot().iter("group")}
     scan = {}
     for line in open(f"{SCAN}/buildings.txt"):
@@ -92,7 +103,7 @@ def buildings():
             x, _, z = (float(v) for v in g.get("pos").split())
             yaw = float(g.get("rpy").split()[2])
         mask = 0
-        for u in usages.get(name) or ["Other"]:
+        for u in usages.get(name.lower()) or ["Other"]:
             mask |= 1 << USAGES.index(u)
         out.append([round(x, 1), round(z, 1), round(yaw) % 360, index[name], mask])
     with open(f"{OUT}/buildings.json", "w") as f:
