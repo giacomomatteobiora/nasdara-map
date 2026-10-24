@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nasdara Map</title>
+  <meta name="robots" content="noindex">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%226%22 fill=%22%23e0a33c%22/%3E%3Cpath d=%22M6 24l7-12 5 7 3-4 5 9z%22 fill=%22%231d1a15%22/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="map"></div>
+
+  <button id="panel-toggle" aria-expanded="false" aria-controls="panel">Layers</button>
+  <aside id="panel">
+    <header>
+      <h1>Nasdara</h1>
+      <div class="base-switch" role="radiogroup" aria-label="Background map">
+        <label><input type="radio" name="base" value="sat" checked> Satellite</label>
+        <label><input type="radio" name="base" value="paper"> Paper map</label>
+      </div>
+    </header>
+    <div id="layers"></div>
+    <footer>Fan-made · map data © Bohemia Interactive · not affiliated</footer>
+  </aside>
+
+  <div id="coords">X — · Z —</div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
