@@ -1,16 +1,21 @@
 """Loot-finder data (site/data/loot.json) from types.xml, mapgroupproto.xml, the event files and areaflags.map.
 
 {"cats": [...], "tags": [...], "usages": [...], "values": [...],     (bit i of a mask = list entry i)
- "items": [[class, catIndex, nominal, usageMask, valueMask, tagMask, deloot, displayName], ...],  (nominal > 0)
+ "items": [[class, catIndex, nominal, usageMask, valueMask, tagMask, deloot, displayName, points], ...],  (nominal > 0;
+           points = loot points in placed buildings the item can take, 0 for deloot items)
  "protos": {"<buildings.json type index>": [groupLootmax, [[catMask, tagMask, points, lootmax, name], ...]]},
  "bu": [usageMask per building], "bt": [valueMask per building],   (same order as buildings.json "b")
  "eprotos": [[usageMask, groupLootmax, conts], ...],                (loot groups of event objects)
  "events": [{"e": eventName, "w": spawn chance per position, "pick": "one"|"all",
              "pos": [[x, z, valueMask, areaUsageMask, [[eprotoIndex, avgLoot, delootOk], ...]], ...]}]}
 
-Rules (vanilla CE): items with deloot=1 only spawn at dynamic events. A building's usage is its proto group usage,
-or the areaflags usage at its position when the group has none. Proto names are matched case-insensitively
-(mapgrouppos and mapgroupproto disagree on case for ~40 classes).
+Rules (vanilla CE): the economy places items, not points: an item below its nominal goes to a random free point
+anywhere on the map that takes it (category, tag, usage, tier), so an item's expected count in a building is
+nominal * (its points there) / (its points on the whole map). The map has ~6x more points than items, so most stay
+empty. Items without usage flags have no usage restriction (vanilla soda cans), so they get every usage bit.
+Items with deloot=1 only spawn at dynamic events. A building's usage is its proto group usage, or the areaflags
+usage at its position when the group has none. Proto names are matched case-insensitively (mapgrouppos and
+mapgroupproto disagree on case for ~40 classes).
 """
 import json
 import os
@@ -68,7 +73,7 @@ def main():
         flags = t.find("flags")
         deloot = int(flags is not None and flags.get("deloot") == "1")
         items.append([t.get("name"), cats.index(cat.get("name")), nominal,
-                      mask(t.findall("usage"), usages, groups["usageflags"]),
+                      mask(t.findall("usage"), usages, groups["usageflags"]) or (1 << len(usages)) - 1,
                       mask(t.findall("value"), values, groups["valueflags"]),
                       mask(t.findall("tag"), tags), deloot, display.get(t.get("name"), "")])
 
@@ -105,6 +110,17 @@ def main():
         v, u = cell(x, z)
         bu.append(group_usage.get(key) or u)
         bt.append(v)
+
+    # loot points each item can take over the whole map, from the building signatures (containers x usage x tier)
+    sigs = {}
+    for ti, u, v in zip((btypes.index(g.get("name").lower().removeprefix("land_")) for g in placed_groups()), bu, bt):
+        for cm, tm, pts, _, _ in (protos.get(str(ti)) or [0, []])[1]:
+            sigs[(cm, tm, u, v)] = sigs.get((cm, tm, u, v), 0) + pts
+    for it in items:
+        it.append(0 if it[6] else sum(n for (cm, tm, u, v), n in sigs.items()
+                                      if (cm >> it[1]) & 1 and (not it[5] or it[5] & tm) and it[3] & u and (not it[4] or it[4] & v)))
+    nowhere = [it[0] for it in items if not it[6] and not it[8]]
+    print(len(sigs), "building signatures;", len(nowhere), "items no building can take:", ", ".join(nowhere[:8]), "...")
 
     # ---- dynamic events ----
     eprotos, eindex = [], {}

@@ -1,7 +1,7 @@
 // Nasdara map. World coordinates are DayZ metres: lat = Z (north), lng = X (east), 0..16384.
 const WORLD = 16384;
 // bump together with the ?v= in index.html on every deploy, so browsers don't mix cached old files with new ones
-const VERSION = 6;
+const VERSION = 7;
 
 // Symbols, 24x24 box. "d" is one path or a list of paths filled separately (so parts can overlap);
 // "s" = stroke width for line glyphs, otherwise filled (even-odd, so inner subpaths cut holes).
@@ -1257,7 +1257,8 @@ function lootHtml(it, top) {
   const total = [...items.values()].reduce((a, b) => a + b, 0);
   const cats = new Map();
   for (const [x, v] of items) cats.set(x[1], (cats.get(x[1]) || 0) + v);
-  return `<div class="cat-bars">${[...cats].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([c, v]) => {
+  const held = total < 1.5 ? total.toFixed(1) : String(Math.round(total));
+  return `<p class="held">Usually holds ≈ ${held} item${held === "1" ? "" : "s"} at a time (max ${proto[0]})</p><div class="cat-bars">${[...cats].filter(([, v]) => v >= total * 0.005).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([c, v]) => {
     const p = (100 * v) / total;
     return `<div><span>${esc(CAT_LABELS[data.cats[c]] || data.cats[c])}</span><i style="--w:${p.toFixed(1)}%"></i><b>${Math.round(p)}%</b></div>`;
   }).join("")}</div>` +
@@ -1648,8 +1649,10 @@ toggle.addEventListener("click", () => {
 // ---- loot finder ----
 // CE-like estimate from the vanilla Nasdara loot tables. A loot point can take an item when its container accepts
 // the item's category (and one of its tags, if it has any), the loot group's usage overlaps the item's usage and
-// the item's tiers (if any) include the zone. Items flagged deloot only spawn at dynamic events. Each point is
-// shared between all items that fit, by nominal. Building points and event loot items count the same.
+// the item's tiers (if any) include the zone. Buildings: the economy places items, not points; an item below its
+// nominal goes to a random point anywhere on the map that takes it, so its expected count at a point is
+// nominal / (all its points on the map, item[8]); most points stay empty. Container and building lootmax cap that.
+// Items flagged deloot only spawn at dynamic events, which spawn a fixed number of items picked by nominal.
 const DERIVED = [
   ["Ammo", (it) => it[0].startsWith("Ammo_")],
   ["Magazines", (it) => it[0].startsWith("Mag_")],
@@ -1678,38 +1681,70 @@ function lootQueries(data) {
   return { q, byClass };
 }
 
-// per container signature: d = nominal of all items that fit, n = nominal of the chosen ones among them
+// per container signature: dens -> [chosen, all] expected items per building point (sum of nominal / map points over
+// the items that fit); nom -> [chosen, all] nominal of the items that fit (event loot)
 function makeSums(items, chosen) {
-  const cache = new Map();
-  return (cm, tm, u, v, ev) => {
-    const key = `${cm}|${tm}|${u}|${v}|${ev}`;
-    let r = cache.get(key);
-    if (!r) {
-      let d = 0, n = 0;
-      for (const it of items) {
-        if (!fits(it, cm, tm, u, v, ev)) continue;
-        d += it[2];
-        if (chosen.has(it)) n += it[2];
+  const dc = new Map(), nc = new Map();
+  return {
+    dens(cm, tm, u, v) {
+      const key = `${cm}|${tm}|${u}|${v}`;
+      let r = dc.get(key);
+      if (!r) {
+        let a = 0, n = 0;
+        for (const it of items) {
+          if (!it[8] || !fits(it, cm, tm, u, v, 0)) continue;
+          const e = it[2] / it[8];
+          a += e;
+          if (chosen.has(it)) n += e;
+        }
+        dc.set(key, (r = [n, a]));
       }
-      r = [n, d];
-      cache.set(key, r);
-    }
-    return r;
+      return r;
+    },
+    nom(cm, tm, u, v, ev) {
+      const key = `${cm}|${tm}|${u}|${v}|${ev}`;
+      let r = nc.get(key);
+      if (!r) {
+        let d = 0, n = 0;
+        for (const it of items) {
+          if (!fits(it, cm, tm, u, v, ev)) continue;
+          d += it[2];
+          if (chosen.has(it)) n += it[2];
+        }
+        nc.set(key, (r = [n, d]));
+      }
+      return r;
+    },
   };
 }
 const fits = (it, cm, tm, u, v, ev) => ((cm >> it[1]) & 1) && (!it[5] || (it[5] & tm)) && (it[3] & u) &&
   (!it[4] || (it[4] & v)) && (ev || !it[6]);
 
-// expected number of chosen items in one loot group: a building fills each container with min(points, lootmax)
-// items (capped by the group lootmax); an event object spawns `amount` items spread over its containers by size
-function groupScore(sums, groupMax, conts, u, v, ev, amount) {
+// expected [chosen, all] items in a building: points x density per container, capped by the container lootmax,
+// then everything scaled down to the group lootmax
+function buildingScore(sums, groupMax, conts, u, v) {
+  let ch = 0, all = 0;
+  for (const [cm, tm, pts, lm] of conts) {
+    const [n, a] = sums.dens(cm, tm, u, v);
+    if (!a) continue;
+    const cap = Math.min(1, lm / (pts * a));
+    ch += pts * n * cap;
+    all += pts * a * cap;
+  }
+  const s = all > groupMax ? groupMax / all : 1;
+  return [ch * s, all * s];
+}
+
+// expected number of chosen items from one event object: `amount` items spread over its containers by size,
+// each container's items picked by nominal
+function eventScore(sums, groupMax, conts, u, v, ev, amount) {
   let slots = 0;
   for (const c of conts) slots += Math.min(c[2], c[3]);
   if (!slots) return 0;
-  const scale = amount == null ? Math.min(1, groupMax / slots) : Math.min(amount, groupMax || amount) / slots;
+  const scale = Math.min(amount, groupMax || amount) / slots;
   let s = 0;
   for (const [cm, tm, pts, lm] of conts) {
-    const [n, d] = sums(cm, tm, u, v, ev);
+    const [n, d] = sums.nom(cm, tm, u, v, ev);
     if (n) s += (Math.min(pts, lm) * n) / d;
   }
   return s * scale;
@@ -1731,7 +1766,7 @@ function lootScores(data, pred) {
   for (let i = 0; i < b.length; i++) {
     const proto = data.protos[b[i].ti];
     if (!proto) continue;
-    const s = groupScore(sums, proto[0], proto[1], data.bu[i], data.bt[i], 0, null);
+    const s = buildingScore(sums, proto[0], proto[1], data.bu[i], data.bt[i])[0];
     if (!s) continue;
     scores[i] = s;
     total += s;
@@ -1742,7 +1777,7 @@ function lootScores(data, pred) {
     let s = 0;
     for (const [ep, amount, dOk, w] of siteKids(e, pos)) {
       const [usage, groupMax, conts] = data.eprotos[ep];
-      s += w * groupScore(sums, groupMax, conts, usage || pos[3], pos[2], dOk, amount);
+      s += w * eventScore(sums, groupMax, conts, usage || pos[3], pos[2], dOk, amount);
     }
     total += s;
     if (s > evMax) evMax = s;
@@ -1751,20 +1786,22 @@ function lootScores(data, pred) {
   return { scores, ev, total, max, evMax, chosen, sums };
 }
 
-// expected items of one building, by item (for the building popup)
+// expected count of each item in one building at a time (popup / catalogue), same model as buildingScore
 function buildingItems(data, i, ti) {
   const proto = data.protos[ti];
   const out = new Map();
   if (!proto) return out;
   const [groupMax, conts] = proto, u = data.bu[i], v = data.bt[i];
-  let slots = 0;
-  for (const c of conts) slots += Math.min(c[2], c[3]);
-  const scale = Math.min(1, groupMax / slots);
+  let all = 0;
   for (const [cm, tm, pts, lm] of conts) {
-    const list = data.items.filter((it) => fits(it, cm, tm, u, v, 0));
-    const d = list.reduce((a, it) => a + it[2], 0);
-    for (const it of list) out.set(it, (out.get(it) || 0) + (Math.min(pts, lm) * scale * it[2]) / d);
+    const list = data.items.filter((it) => it[8] && fits(it, cm, tm, u, v, 0));
+    const a = list.reduce((x, it) => x + it[2] / it[8], 0);
+    if (!a) continue;
+    const cap = Math.min(1, lm / (pts * a));
+    for (const it of list) out.set(it, (out.get(it) || 0) + (pts * it[2] * cap) / it[8]);
+    all += pts * a * cap;
   }
+  if (all > groupMax) for (const [it, e] of out) out.set(it, (e * groupMax) / all);
   return out;
 }
 
@@ -1925,7 +1962,7 @@ async function runLoot(q) {
     }
     const tot = [...sum.values()].reduce((a, b) => a + b, 0);
     const n = buildingLayer._items.filter((it) => it.bk).length;
-    html += `<p class="hint">${n} bunkers · about ${Math.round(tot)} items when all are full. Most likely finds:</p>` +
+    html += `<p class="hint">${n} bunkers · usually ≈ ${Math.round(tot)} items in them at a time. Most likely finds:</p>` +
       `<ol class="loot-items">${[...sum].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([x, v]) =>
         `<li><span>${esc(x[7] || x[0])}</span><b>${(100 * v / tot).toFixed(1)}%</b></li>`).join("")}</ol>`;
   } else if (chosen.length === 1) {
@@ -1933,7 +1970,8 @@ async function runLoot(q) {
     const flags = (mask, list) => list.filter((n, i) => mask & (1 << i));
     const tiers = flags(it[4], data.values).map((v) => v.replace("Tier", "T")).join(" ") || "any tier";
     html += `<p class="hint">${esc(CAT_LABELS[data.cats[it[1]]] || data.cats[it[1]])} · nominal ${it[2]} · ` +
-      `${esc(flags(it[3], data.usages).join(", ") || "no usage")} · ${esc(tiers)}${it[6] ? " · <b>events only</b>" : ""}</p>`;
+      `${it[3] === (1 << data.usages.length) - 1 ? "any building type" : esc(flags(it[3], data.usages).join(", "))} · ${esc(tiers)}` +
+      `${it[6] ? " · <b>events only</b>" : !it[8] ? " · <b>no building can hold it</b>" : ""}</p>`;
   } else {
     html += `<p class="hint">${chosen.length} item types</p>`;
   }
@@ -1979,7 +2017,7 @@ buildingLayer.setDotStyle((it, ci) => {
   const data = loot.data, proto = data && data.protos[it.ti];
   const c = proto && proto[1][ci];
   if (!c) return "#ffffff";
-  if (loot.sums) return loot.sums(c[0], c[1], data.bu[it.i], data.bt[it.i], 0)[0] ? "#7cfc00" : DIM_DOT;
+  if (loot.sums) return loot.sums.dens(c[0], c[1], data.bu[it.i], data.bt[it.i])[0] ? "#7cfc00" : DIM_DOT;
   return DOT_KINDS[dotKind(c)][1];
 });
 

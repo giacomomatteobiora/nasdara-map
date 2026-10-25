@@ -293,3 +293,4 @@ input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
   .cat-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
 }
 .cat-filters[hidden] { display: none; }
+.held { margin: 0 0 6px; font-size: 12px; color: var(--muted); }
