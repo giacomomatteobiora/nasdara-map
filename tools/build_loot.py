@@ -1,21 +1,28 @@
 """Loot-finder data (site/data/loot.json) from types.xml, mapgroupproto.xml, the event files and areaflags.map.
 
 {"cats": [...], "tags": [...], "usages": [...], "values": [...],     (bit i of a mask = list entry i)
- "items": [[class, catIndex, nominal, usageMask, valueMask, tagMask, deloot, displayName, points], ...],  (nominal > 0;
-           points = loot points in placed buildings the item can take, 0 for deloot items)
- "protos": {"<buildings.json type index>": [groupLootmax, [[catMask, tagMask, points, lootmax, name], ...]]},
+ "items": [[class, catIndex, nominal, usageMask, valueMask, tagMask, deloot, displayName, slots], ...],  (nominal > 0;
+           slots = sum of sqrt(lootmax) over the containers in placed buildings that take the item, or for car parts
+           the number of wreck dispatch slots listing it; 0 for deloot items)
+ "protos": {"<buildings.json type index>": [groupLootmax, [[catMask, tagMask, points, lootmax, name], ...],
+                                             [[itemIndex, dispatchSlots], ...]]},
  "bu": [usageMask per building], "bt": [valueMask per building],   (same order as buildings.json "b")
  "eprotos": [[usageMask, groupLootmax, conts], ...],                (loot groups of event objects)
  "events": [{"e": eventName, "w": spawn chance per position, "pick": "one"|"all",
              "pos": [[x, z, valueMask, areaUsageMask, [[eprotoIndex, avgLoot, delootOk], ...]], ...]}]}
 
-Rules (vanilla CE): the economy places items, not points: an item below its nominal goes to a random free point
-anywhere on the map that takes it (category, tag, usage, tier), so an item's expected count in a building is
-nominal * (its points there) / (its points on the whole map). The map has ~6x more points than items, so most stay
-empty. Items without usage flags have no usage restriction (vanilla soda cans), so they get every usage bit.
-Items with deloot=1 only spawn at dynamic events. A building's usage is its proto group usage, or the areaflags
-usage at its position when the group has none. Proto names are matched case-insensitively (mapgrouppos and
-mapgroupproto disagree on case for ~40 classes).
+Rules, checked against a real CE run (tools/lootdump_init.c + build/lootcheck.py, 24,960 items, 99% consistent):
+- The economy places items, not points: an item below its nominal goes into a random container anywhere on the map
+  that takes it, picked with weight sqrt(container lootmax) (that fit the real run best: per point overfills big
+  buildings, uniform per container or per building underfills police/medical/military ones), capped by the container
+  and group lootmax. The map has ~6x more points than items, so most stay empty.
+- A container takes an item when it has the item's category, the item has no tags or the container has none or they
+  share one, the building's usage overlaps the item's (no usage flags = anywhere, like vanilla soda cans) and the
+  item's tiers (if any) include the zone.
+- A building's usage is its proto group usage plus the areaflags usage at its position.
+- Car parts (lootdispatch) only go to the <dispatch> proxies of the matching car wrecks.
+- Items with deloot=1 only spawn at dynamic events.
+Proto names are matched case-insensitively (mapgrouppos and mapgroupproto disagree on case for ~40 classes).
 """
 import json
 import os
@@ -77,6 +84,7 @@ def main():
                       mask(t.findall("value"), values, groups["valueflags"]),
                       mask(t.findall("tag"), tags), deloot, display.get(t.get("name"), "")])
 
+    item_index = {it[0].lower(): k for k, it in enumerate(items)}
     proto = ET.parse(f"{MISSION}/mapgroupproto.xml").getroot()
     defaults = {d.get("name"): int(d.get("lootmax")) for d in proto.find("defaults")}
     group_usage, group_proto = {}, {}
@@ -90,8 +98,14 @@ def main():
                               c.get("name")])
         key = g.get("name").lower()
         group_usage[key] = mask(g.findall("usage"), usages)
-        if conts:
-            group_proto[key] = [int(g.get("lootmax", defaults["group"])), conts]
+        disp = g.find("dispatch")
+        dispatch = {}
+        for pr in (disp.findall("proxy") if disp is not None else []):
+            k = pr.get("type").lower()
+            if k in item_index:
+                dispatch[item_index[k]] = dispatch.get(item_index[k], 0) + 1
+        if conts or dispatch:
+            group_proto[key] = [int(g.get("lootmax", defaults["group"])), conts, sorted(dispatch.items())]
 
     area_usage, area_value = load_layers()
 
@@ -108,17 +122,24 @@ def main():
         if key in group_proto:
             protos[str(ti)] = group_proto[key]
         v, u = cell(x, z)
-        bu.append(group_usage.get(key) or u)
+        bu.append(group_usage.get(key, 0) | u)
         bt.append(v)
 
-    # loot points each item can take over the whole map, from the building signatures (containers x usage x tier)
-    sigs = {}
+    # containers each item can go into over the whole map, from the building signatures (container x usage x tier),
+    # plus the wreck dispatch slots for car parts
+    sigs, disp_slots = {}, {}
     for ti, u, v in zip((btypes.index(g.get("name").lower().removeprefix("land_")) for g in placed_groups()), bu, bt):
-        for cm, tm, pts, _, _ in (protos.get(str(ti)) or [0, []])[1]:
-            sigs[(cm, tm, u, v)] = sigs.get((cm, tm, u, v), 0) + pts
-    for it in items:
-        it.append(0 if it[6] else sum(n for (cm, tm, u, v), n in sigs.items()
-                                      if (cm >> it[1]) & 1 and (not it[5] or it[5] & tm) and it[3] & u and (not it[4] or it[4] & v)))
+        pr = protos.get(str(ti))
+        if not pr:
+            continue
+        for cm, tm, _, lm, _ in pr[1]:
+            sigs[(cm, tm, u, v)] = sigs.get((cm, tm, u, v), 0) + lm ** 0.5
+        for k, n in pr[2]:
+            disp_slots[k] = disp_slots.get(k, 0) + n
+    for k, it in enumerate(items):
+        it.append(0 if it[6] else round(disp_slots.get(k, 0) + sum(
+            n for (cm, tm, u, v), n in sigs.items()
+            if (cm >> it[1]) & 1 and (not it[5] or not tm or it[5] & tm) and it[3] & u and (not it[4] or it[4] & v)), 2))
     nowhere = [it[0] for it in items if not it[6] and not it[8]]
     print(len(sigs), "building signatures;", len(nowhere), "items no building can take:", ", ".join(nowhere[:8]), "...")
 

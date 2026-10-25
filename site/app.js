@@ -1,7 +1,7 @@
 // Nasdara map. World coordinates are DayZ metres: lat = Z (north), lng = X (east), 0..16384.
 const WORLD = 16384;
 // bump together with the ?v= in index.html on every deploy, so browsers don't mix cached old files with new ones
-const VERSION = 7;
+const VERSION = 8;
 
 // Symbols, 24x24 box. "d" is one path or a list of paths filled separately (so parts can overlap);
 // "s" = stroke width for line glyphs, otherwise filled (even-odd, so inner subpaths cut holes).
@@ -1649,10 +1649,12 @@ toggle.addEventListener("click", () => {
 // ---- loot finder ----
 // CE-like estimate from the vanilla Nasdara loot tables. A loot point can take an item when its container accepts
 // the item's category (and one of its tags, if it has any), the loot group's usage overlaps the item's usage and
-// the item's tiers (if any) include the zone. Buildings: the economy places items, not points; an item below its
-// nominal goes to a random point anywhere on the map that takes it, so its expected count at a point is
-// nominal / (all its points on the map, item[8]); most points stay empty. Container and building lootmax cap that.
+// the item's tiers (if any) include the zone; a container without tags takes items of any tag. Buildings: the economy
+// places items, not points; an item below its nominal goes into a random container anywhere on the map that takes it,
+// weighted by sqrt(container lootmax), so its expected count in one container is nominal * sqrt(lootmax) / item[8]
+// (item[8] = that weight summed over all its containers on the map); most points stay empty. Container and building lootmax cap that. Car parts go to the dispatch slots of matching wrecks (proto[2]).
 // Items flagged deloot only spawn at dynamic events, which spawn a fixed number of items picked by nominal.
+// Checked against a real CE run (build/lootcheck.py).
 const DERIVED = [
   ["Ammo", (it) => it[0].startsWith("Ammo_")],
   ["Magazines", (it) => it[0].startsWith("Mag_")],
@@ -1681,11 +1683,12 @@ function lootQueries(data) {
   return { q, byClass };
 }
 
-// per container signature: dens -> [chosen, all] expected items per building point (sum of nominal / map points over
-// the items that fit); nom -> [chosen, all] nominal of the items that fit (event loot)
+// per container signature: dens -> [chosen, all] expected items in one building container per unit of container
+// weight (sum of nominal / item[8] over the items that fit); nom -> [chosen, all] nominal of the items that fit (event loot)
 function makeSums(items, chosen) {
   const dc = new Map(), nc = new Map();
   return {
+    chosen,
     dens(cm, tm, u, v) {
       const key = `${cm}|${tm}|${u}|${v}`;
       let r = dc.get(key);
@@ -1717,22 +1720,29 @@ function makeSums(items, chosen) {
     },
   };
 }
-const fits = (it, cm, tm, u, v, ev) => ((cm >> it[1]) & 1) && (!it[5] || (it[5] & tm)) && (it[3] & u) &&
+const fits = (it, cm, tm, u, v, ev) => ((cm >> it[1]) & 1) && (!it[5] || !tm || (it[5] & tm)) && (it[3] & u) &&
   (!it[4] || (it[4] & v)) && (ev || !it[6]);
 
-// expected [chosen, all] items in a building: points x density per container, capped by the container lootmax,
-// then everything scaled down to the group lootmax
-function buildingScore(sums, groupMax, conts, u, v) {
+// expected [chosen, all] items in a building: density per container, capped by the container lootmax, then
+// scaled down to the group lootmax; plus car parts in the wreck dispatch slots
+function buildingScore(sums, groupMax, conts, u, v, dispatch, items) {
   let ch = 0, all = 0;
-  for (const [cm, tm, pts, lm] of conts) {
-    const [n, a] = sums.dens(cm, tm, u, v);
+  for (const [cm, tm, , lm] of conts) {
+    const [n, a] = sums.dens(cm, tm, u, v), w = Math.sqrt(lm);
     if (!a) continue;
-    const cap = Math.min(1, lm / (pts * a));
-    ch += pts * n * cap;
-    all += pts * a * cap;
+    const cap = Math.min(1, lm / (a * w));
+    ch += n * w * cap;
+    all += a * w * cap;
   }
   const s = all > groupMax ? groupMax / all : 1;
-  return [ch * s, all * s];
+  ch *= s;
+  all *= s;
+  for (const [k, slots] of dispatch || []) {
+    const it = items[k], e = (it[2] * slots) / it[8];
+    all += e;
+    if (sums.chosen.has(it)) ch += e;
+  }
+  return [ch, all];
 }
 
 // expected number of chosen items from one event object: `amount` items spread over its containers by size,
@@ -1766,7 +1776,7 @@ function lootScores(data, pred) {
   for (let i = 0; i < b.length; i++) {
     const proto = data.protos[b[i].ti];
     if (!proto) continue;
-    const s = buildingScore(sums, proto[0], proto[1], data.bu[i], data.bt[i])[0];
+    const s = buildingScore(sums, proto[0], proto[1], data.bu[i], data.bt[i], proto[2], data.items)[0];
     if (!s) continue;
     scores[i] = s;
     total += s;
@@ -1791,17 +1801,21 @@ function buildingItems(data, i, ti) {
   const proto = data.protos[ti];
   const out = new Map();
   if (!proto) return out;
-  const [groupMax, conts] = proto, u = data.bu[i], v = data.bt[i];
+  const [groupMax, conts, dispatch] = proto, u = data.bu[i], v = data.bt[i];
   let all = 0;
-  for (const [cm, tm, pts, lm] of conts) {
+  for (const [cm, tm, , lm] of conts) {
     const list = data.items.filter((it) => it[8] && fits(it, cm, tm, u, v, 0));
-    const a = list.reduce((x, it) => x + it[2] / it[8], 0);
+    const w = Math.sqrt(lm), a = list.reduce((x, it) => x + (it[2] * w) / it[8], 0);
     if (!a) continue;
-    const cap = Math.min(1, lm / (pts * a));
-    for (const it of list) out.set(it, (out.get(it) || 0) + (pts * it[2] * cap) / it[8]);
-    all += pts * a * cap;
+    const cap = Math.min(1, lm / a);
+    for (const it of list) out.set(it, (out.get(it) || 0) + (it[2] * w * cap) / it[8]);
+    all += a * cap;
   }
   if (all > groupMax) for (const [it, e] of out) out.set(it, (e * groupMax) / all);
+  for (const [k, slots] of dispatch || []) {
+    const it = data.items[k];
+    out.set(it, (out.get(it) || 0) + (it[2] * slots) / it[8]);
+  }
   return out;
 }
 
