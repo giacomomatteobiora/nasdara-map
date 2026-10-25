@@ -1,5 +1,7 @@
 // Nasdara map. World coordinates are DayZ metres: lat = Z (north), lng = X (east), 0..16384.
 const WORLD = 16384;
+// bump together with the ?v= in index.html on every deploy, so browsers don't mix cached old files with new ones
+const VERSION = 6;
 
 // Symbols, 24x24 box. "d" is one path or a list of paths filled separately (so parts can overlap);
 // "s" = stroke width for line glyphs, otherwise filled (even-odd, so inner subpaths cut holes).
@@ -314,7 +316,7 @@ function loadRoofs() {
       resolve();
     };
     img.onerror = () => resolve();
-    img.src = "data/roofs.png";
+    img.src = `data/roofs.png?v=${VERSION}`;
   }));
 }
 
@@ -862,7 +864,7 @@ function writeHash() {
 const layers = {}; // key -> { layer, built, group, type }
 const dataPromise = {};
 function loadData(file) {
-  return (dataPromise[file] ??= fetch(`data/${file}.json`).then((r) => r.json()));
+  return (dataPromise[file] ??= fetch(`data/${file}.json?v=${VERSION}`).then((r) => r.json()));
 }
 
 async function buildLayer(key) {
