@@ -2,7 +2,9 @@
 
 vehicles/events/spawns.json: {"<sub-type>": [[x, z, typeIndex], ...], ..., "_types": [names]}
 buildings.json: {"usages": [...], "types": [[class, minX, minZ, maxX, maxZ], ...],
-                 "b": [[x, z, yawDeg, typeIndex, usageBitmask], ...]}  (one entry per building)
+                 "b": [[x, z, yawDeg, typeIndex, usageBitmask], ...],  (one entry per building)
+                 "bunkers": {"<typeIndex>": "shelter"|"basement"|"tunnel"},
+                 "broadcast": {"active": n, "codeLength": n, "periods": [["1745", "0600"], ...], "sites": n}}
 names.json: [[name, type, x, z], ...]
 powerlines.json: {"lines": [{"k": "vhv"|"hv", "p": [[x, z], ...]}], "poles": [[x, z, kind], ...]}
 
@@ -106,9 +108,35 @@ def buildings():
         for u in usages.get(name.lower()) or ["Other"]:
             mask |= 1 << USAGES.index(u)
         out.append([round(x, 1), round(z, 1), round(yaw) % 360, index[name], mask])
+    bunkers, broadcast = bunker_info(types, out)
     with open(f"{OUT}/buildings.json", "w") as f:
-        json.dump({"usages": USAGES, "types": types, "b": out}, f, separators=(",", ":"))
-    print("buildings", len(out), "from scan", len(scan), "classes", len(types))
+        json.dump({"usages": USAGES, "types": types, "b": out, "bunkers": bunkers, "broadcast": broadcast},
+                  f, separators=(",", ":"))
+    print("buildings", len(out), "from scan", len(scan), "classes", len(types), "bunker classes", len(bunkers))
+
+
+def bunker_info(types, out):
+    """Bunker classes (1.29+ code-locked shelters/basements, tunnel bunkers) and the radio code broadcast settings.
+    Every locked bunker has a cfgbunkerbroadcast proxy on its position; the tunnel bunkers have none."""
+    kinds = {}
+    for ti, t in enumerate(types):
+        name = t[0].lower()
+        if name.startswith("bunker_shelter"):
+            kinds[str(ti)] = "shelter"
+        elif name.startswith("bunker_basement"):
+            kinds[str(ti)] = "basement"
+        elif name == "tunnel_single_bunker":
+            kinds[str(ti)] = "tunnel"
+    cfg = json.load(open(f"{MISSION}/cfgbunkerbroadcast.json"))
+    proxies = [(p["position"][0], p["position"][2]) for p in cfg["proxies"]]
+    locked = [b for b in out if kinds.get(str(b[3])) in ("shelter", "basement")]
+    unmatched = [b for b in locked if min(math.hypot(b[0] - x, b[1] - z) for x, z in proxies) > 2]
+    if unmatched:
+        print("WARNING: locked bunkers without a broadcast proxy:", unmatched)
+    return kinds, {"active": cfg["bunkerSettings"]["numberOfActive"],
+                   "codeLength": cfg["bunkerSettings"]["lockCodeLength"],
+                   "periods": [[p["startTime"], p["endTime"]] for p in cfg["schedulerSettings"]["periods"]],
+                   "sites": len(proxies)}
 
 
 def names():

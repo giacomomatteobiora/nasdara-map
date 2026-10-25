@@ -35,6 +35,9 @@ const GLYPHS = {
   drop: { d: "M12 2.5C9 7.5 5.5 11 5.5 15a6.5 6.5 0 0 0 13 0c0-4-3.5-7.5-6.5-12.5zm-3 12.3a3 3 0 0 0 3 3v1.7a4.7 4.7 0 0 1-4.7-4.7z" },
   lock: { d: "M6.5 10.5V8a5.5 5.5 0 0 1 11 0v2.5H19v11H5v-11zm2.6 0h5.8V8a2.9 2.9 0 0 0-5.8 0zm1.7 4v3.5h2.4v-3.5z" },
   person: { d: ["M12 1.8a3 3 0 1 0 .01 0z", "M8 8h8l2 7.5h-2.7L14.5 22h-5l-.8-6.5H6z"] },
+  // bunkers: arched blast door with a wheel / a tunnel mouth
+  bunker: { d: ["M3 21V10a9 9 0 0 1 18 0v11h-2.6V10a6.4 6.4 0 0 0-12.8 0V21z", "M7.6 21V10.5a4.4 4.4 0 0 1 8.8 0V21zM12 12.4a2.4 2.4 0 1 0 .01 0z"] },
+  tunnel: { d: "M2 21V11a10 7 0 0 1 20 0v10h-4.5v-8a5.5 4.5 0 0 0-11 0v8z" },
 };
 
 const GROUPS = [
@@ -59,6 +62,15 @@ const GROUPS = [
       Coast: ["Coast", "#39c5cf", false, "anchor"],
       Historical: ["Historical", "#8d6e63", false, "column"],
       Other: ["Other (wrecks etc.)", "#555c66", false, "car"],
+    },
+  },
+  {
+    // the same building data, picked by class: code-locked bunkers (keypad code broadcast in Morse) and tunnel bunkers
+    id: "k", file: "buildings", title: "Bunkers", bunkers: true, shape: "square",
+    types: {
+      shelter: ["Locked bunker (shelter)", "#2dd4bf", true, "bunker"],
+      basement: ["Locked bunker (basement)", "#14b8a6", true, "bunker"],
+      tunnel: ["Tunnel bunker", "#94a3b8", true, "tunnel"],
     },
   },
   {
@@ -89,10 +101,19 @@ const GROUPS = [
     types: { FreshSpawn: ["Fresh spawn area (200 × 200 m)", "#34d399", true, "person"] },
   },
   {
+    // traced from the in-game paper map (tools/build_roads.py)
+    id: "r", file: "roads", title: "Roads", lines: true, roads: true,
+    types: {
+      main: ["Highway & main roads", "#f39237", true],
+      road: ["Roads", "#ffd75e", true],
+      track: ["Tracks", "#8a6a45", true],
+    },
+  },
+  {
     id: "p", file: "powerlines", title: "Power lines", lines: true,
     types: {
-      vhv: ["High-voltage (big pylons)", "#d9534f", true],
-      hv: ["Power lines", "#d8c35a", true],
+      vhv: ["High-voltage (big pylons)", "#a855f7", true],
+      hv: ["Power lines", "#38bdf8", true],
     },
   },
   {
@@ -123,22 +144,24 @@ const crs = L.extend({}, L.CRS.Simple, {
 const bounds = L.latLngBounds([0, 0], [WORLD, WORLD]);
 
 const map = L.map("map", {
-  crs, minZoom: 0, maxZoom: 8, zoomSnap: 0.5, zoomDelta: 0.5, wheelPxPerZoomLevel: 90,
+  crs, minZoom: 0, maxZoom: 9, zoomSnap: 0.5, zoomDelta: 0.5, wheelPxPerZoomLevel: 90,
   maxBounds: bounds.pad(0.15), maxBoundsViscosity: 0.8,
   preferCanvas: true, attributionControl: false, zoomControl: false,
 });
 L.control.zoom({ position: "topleft" }).addTo(map);
-map.createPane("tiers").style.zIndex = 380; // tier zones, loot heatmap, buildings, then the vector canvas (400)
+map.createPane("roads").style.zIndex = 370; // roads, tier zones, loot heatmap, buildings, then the vector canvas (400)
+map.createPane("tiers").style.zIndex = 380;
 map.createPane("heat").style.zIndex = 385;
 map.createPane("buildings").style.zIndex = 390;
 map.createPane("points").style.zIndex = 420; // vehicle / event / spawn icons
 map.createPane("labels").style.zIndex = 650; // above markers, below popups
 const renderer = L.canvas({ padding: 0.5, tolerance: 4 });
+const roadRenderer = L.canvas({ pane: "roads", padding: 0.5 }); // under the buildings
 
 const bases = {
-  sat: L.tileLayer("tiles/sat/{z}/{x}/{y}.jpg", { maxNativeZoom: 6, maxZoom: 8, bounds, noWrap: true }),
-  paper: L.tileLayer("tiles/paper/{z}/{x}/{y}.jpg", { maxNativeZoom: 4, maxZoom: 8, bounds, noWrap: true }),
-  terrain: L.tileLayer("tiles/terrain/{z}/{x}/{y}.jpg", { maxNativeZoom: 5, maxZoom: 8, bounds, noWrap: true }),
+  sat: L.tileLayer("tiles/sat/{z}/{x}/{y}.jpg", { maxNativeZoom: 6, maxZoom: 9, bounds, noWrap: true }),
+  paper: L.tileLayer("tiles/paper/{z}/{x}/{y}.jpg", { maxNativeZoom: 4, maxZoom: 9, bounds, noWrap: true }),
+  terrain: L.tileLayer("tiles/terrain/{z}/{x}/{y}.jpg", { maxNativeZoom: 5, maxZoom: 9, bounds, noWrap: true }),
 };
 let base = "sat";
 
@@ -252,9 +275,10 @@ const CanvasLayer = L.Renderer.extend({
   },
 });
 
-// ---- buildings: badges when zoomed out, real rotated footprints when zoomed in ----
+// ---- buildings: badges when zoomed out, real outlines when zoomed in, shaded roofs from the roof scan up close ----
 const FOOTPRINT_SCALE = 0.7; // px per metre at which footprints replace badges (~zoom 5.5)
 const LOOT_DOT_SCALE = 2; // px per metre from which loot points are drawn (zoom 7)
+const ROOF_SCALE = 2; // px per metre from which buildings are drawn as their roofs, seen from above (zoom 7)
 const DIM_DOT = "rgba(150,150,150,0.55)";
 
 // even-odd point-in-polygon over all loops, or within tol metres of an edge
@@ -273,15 +297,125 @@ function insideLoops(loops, x, z, tol) {
 }
 const CELL = 512; // metres, spatial index cell
 
+// roofs.png (tools/build_shapes.py): per class a block of 0.5 m cells, R*256+G = height above ground in dm + 1000,
+// A = 255 above ground / 128 underground. Loaded once, when first zoomed in that far (or for a popup plan).
+const roofAtlas = { data: null, width: 0, loading: null };
+function loadRoofs() {
+  return (roofAtlas.loading ??= new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement("canvas");
+      c.width = img.width;
+      c.height = img.height;
+      const ctx = c.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0);
+      roofAtlas.data = ctx.getImageData(0, 0, img.width, img.height).data;
+      roofAtlas.width = img.width;
+      resolve();
+    };
+    img.onerror = () => resolve();
+    img.src = "data/roofs.png";
+  }));
+}
+
+const hexRgb = (hex) => { const n = parseInt(hex.slice(1), 16); return [n >> 16, (n >> 8) & 255, n & 255]; };
+// world direction towards the sun (east, up, north): from the north-west, 45° up, like the terrain hill shading
+const SUN = [-0.5, Math.SQRT1_2, 0.5];
+const ROOF_CELL = 0.5; // metres per roof pixel
+
+// One building class as seen from above: grey roof ramp by height, tinted with its loot colour, lit by the sun
+// (rotated into model space, so the sprite depends on the yaw), dark edges where the height jumps (walls, roof steps,
+// chimneys) and hatched underground parts. Row 0 = model z0, drawn with a y-flipping transform.
+const roofCache = new Map();
+function roofSprite(sh, ti, yaw, color, showUnder) {
+  if (!roofAtlas.data || !sh || !sh.r) return null;
+  const key = `${ti}/${Math.round(yaw / 3) % 120}/${color}/${showUnder ? 1 : 0}`;
+  let c = roofCache.get(key);
+  if (c) return c;
+  if (roofCache.size > 900) roofCache.clear();
+  const [ax, ay, w, h] = sh.r, A = roofAtlas.data, W = roofAtlas.width;
+  const H = new Float32Array(w * h).fill(NaN), U = new Uint8Array(w * h);
+  for (let j = 0; j < h; j++) {
+    for (let i = 0; i < w; i++) {
+      const k = ((ay + j) * W + ax + i) * 4;
+      if (!A[k + 3]) continue;
+      U[j * w + i] = A[k + 3] < 200;
+      if (U[j * w + i] && !showUnder) continue;
+      H[j * w + i] = (((A[k] << 8) | A[k + 1]) - 1000) / 10;
+    }
+  }
+  const a = (Math.round(yaw / 3) * 3 * Math.PI) / 180, cos = Math.cos(a), sin = Math.sin(a);
+  const sx = SUN[0] * cos - SUN[2] * sin, sz = SUN[0] * sin + SUN[2] * cos, sy = SUN[1];
+  const tint = hexRgb(color);
+  c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d");
+  const img = ctx.createImageData(w, h), D = img.data;
+  const at = (i, j, d) => {
+    if (i < 0 || j < 0 || i >= w || j >= h) return d;
+    const v = H[j * w + i];
+    return v === v ? v : d;
+  };
+  for (let j = 0; j < h; j++) {
+    for (let i = 0; i < w; i++) {
+      const v = H[j * w + i];
+      if (v !== v) continue;
+      const l = at(i - 1, j, v), r = at(i + 1, j, v), dn = at(i, j - 1, v), up = at(i, j + 1, v);
+      const k = (j * w + i) * 4;
+      let rgb, f;
+      if (U[j * w + i]) {
+        // underground: cool slate with diagonal hatching
+        rgb = (i + j) % 4 < 2 ? [104, 116, 130] : [78, 88, 100];
+        f = 1;
+      } else {
+        const gx = Math.max(-3, Math.min(3, (r - l) / (2 * ROOF_CELL))), gz = Math.max(-3, Math.min(3, (up - dn) / (2 * ROOF_CELL)));
+        const lam = (-gx * sx + sy - gz * sz) / Math.hypot(gx, 1, gz);
+        const t = Math.max(0, Math.min(1, v / 9));
+        const g = [136 + 96 * t, 132 + 96 * t, 126 + 96 * t];
+        rgb = g.map((x, ch) => x * 0.72 + tint[ch] * 0.28);
+        const jump = Math.max(Math.abs(l - v), Math.abs(r - v), Math.abs(dn - v), Math.abs(up - v)) > 0.8;
+        f = (0.42 + 0.75 * Math.max(0, lam)) * (jump ? 0.5 : 1);
+      }
+      D[k] = Math.min(255, rgb[0] * f);
+      D[k + 1] = Math.min(255, rgb[1] * f);
+      D[k + 2] = Math.min(255, rgb[2] * f);
+      D[k + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  roofCache.set(key, c);
+  return c;
+}
+
+// loot points grouped into levels (gaps > 1.8 m between heights); labels G, 1, 2 … above ground, B1, B2 … below
+function lootLevels(pts) {
+  const ys = [...new Set(pts.map((p) => p[2]))].sort((a, b) => a - b);
+  const levels = [];
+  for (const y of ys) {
+    const last = levels[levels.length - 1];
+    if (last && y - last.max <= 1.8) last.max = y;
+    else levels.push({ min: y, max: y });
+  }
+  const gi = levels.findIndex((l) => l.max > -1.2), ground = gi < 0 ? levels.length : gi;
+  levels.forEach((l, i) => { l.label = i < ground ? `B${ground - i}` : i === ground ? "G" : String(i - ground); });
+  const of = (y) => levels.findIndex((l) => y >= l.min - 0.01 && y <= l.max + 0.01);
+  return { levels, of };
+}
+
 const BuildingLayer = CanvasLayer.extend({
   options: { pane: "buildings" },
 
   setData(data) {
     this._usages = data.usages;
     this._types = data.types;
+    this._bunkers = data.bunkers || {};
+    this._broadcast = data.broadcast;
+    this._typeCount = new Map();
     this._items = data.b.map(([x, z, yaw, ti, mask], i) => {
       const a = (yaw * Math.PI) / 180;
-      return { i, x, z, cos: Math.cos(a), sin: Math.sin(a), t: data.types[ti], ti, mask };
+      this._typeCount.set(ti, (this._typeCount.get(ti) || 0) + 1);
+      return { i, x, z, yaw, cos: Math.cos(a), sin: Math.sin(a), t: data.types[ti], ti, mask, bk: this._bunkers[ti] };
     });
     this._grid = new Map();
     for (const it of this._items) {
@@ -290,13 +424,16 @@ const BuildingLayer = CanvasLayer.extend({
       this._grid.get(k).push(it);
     }
     this._mask = 0;
+    this._kinds = new Set();
     this.redraw();
   },
 
-  setEnabled(usages) {
+  // usages: enabled loot types; kinds: enabled bunker kinds (shown whatever their loot type)
+  setEnabled(usages, kinds) {
     if (!this._usages) return;
     this._mask = 0;
     this._usages.forEach((u, i) => { if (usages.has(u)) this._mask |= 1 << i; });
+    this._kinds = kinds;
     this.redraw();
   },
 
@@ -307,18 +444,41 @@ const BuildingLayer = CanvasLayer.extend({
     this.redraw();
   },
 
-  _shown(it) {
-    return this._focus ? this._focus[it.i] > 0 : (it.mask & this._mask) !== 0;
+  // clicked building: bright outline, its loot points always shown (optionally one level only)
+  select(it, level = null) {
+    this._sel = it;
+    this._level = level;
+    if (it) loadRoofs().then(() => this.redraw());
+    this.redraw();
   },
 
-  // first loot type in priority order (enabled ones, or all when focused), or -1
+  // "show all of this type": every instance shown and ringed
+  highlightType(ti) {
+    this._hiType = ti;
+    this.redraw();
+  },
+
+  _shown(it) {
+    if (it === this._sel || it.ti === this._hiType) return true;
+    if (this._focus) return this._focus[it.i] > 0;
+    return (it.mask & this._mask) !== 0 || (it.bk !== undefined && this._kinds.has(it.bk));
+  },
+
+  // "<group>/<type>" of the badge / colour: the bunker kind if that layer is on, else the first loot type in priority
+  // order (enabled ones, or all when focused / highlighted)
   _style(it) {
-    const m = this._focus ? it.mask : it.mask & this._mask;
-    return m ? 31 - Math.clz32(m & -m) : -1;
+    if (it.bk && (this._focus || this._kinds.has(it.bk))) return `k/${it.bk}`;
+    const m = this._focus || it === this._sel || it.ti === this._hiType ? it.mask : it.mask & this._mask;
+    return `b/${this._usages[m ? 31 - Math.clz32(m & -m) : this._usages.length - 1]}`;
+  },
+
+  // bunkers on top, then loot types in priority order
+  _rank(st) {
+    return st[0] === "k" ? -1 : this._usages.indexOf(st.slice(2));
   },
 
   _visible(cb) {
-    if (!this._grid || (!this._mask && !this._focus)) return;
+    if (!this._grid) return;
     const map = this._map, b = this._bounds;
     const nw = map.layerPointToLatLng(b.min), se = map.layerPointToLatLng(b.max);
     for (let cx = Math.floor(nw.lng / CELL) - 1; cx <= Math.floor(se.lng / CELL) + 1; cx++) {
@@ -345,11 +505,21 @@ const BuildingLayer = CanvasLayer.extend({
     this.redraw();
   },
 
+  shapeOf(it) {
+    return this._shapes && this._shapes[it.ti];
+  },
+
   _loops(it) {
-    const sh = this._shapes && this._shapes[it.ti];
+    const sh = this.shapeOf(it);
     if (sh && sh.p) return sh.p;
     const [, x0, z0, x1, z1] = it.t;
     return [[[x0, z0], [x1, z0], [x1, z1], [x0, z1]]];
+  },
+
+  // underground parts are worth drawing for bunkers and buildings with loot below ground, not for foundations
+  showUnder(it) {
+    const sh = this.shapeOf(it);
+    return !!(sh && sh.u && (it.bk || (sh.l || []).some((p) => p[2] < -1.5)));
   },
 
   // model-space point -> layer px (yaw clockwise from north)
@@ -357,58 +527,124 @@ const BuildingLayer = CanvasLayer.extend({
     return [px + (lx * it.cos + lz * it.sin) * s, py - (-lx * it.sin + lz * it.cos) * s];
   },
 
-  _path(ctx, loops) {
+  _path(ctx, loops, dx = 0, dy = 0) {
     for (const p of loops) {
-      ctx.moveTo(p[0][0], p[0][1]);
-      for (let i = 1; i < p.length; i++) ctx.lineTo(p[i][0], p[i][1]);
+      ctx.moveTo(p[0][0] + dx, p[0][1] + dy);
+      for (let i = 1; i < p.length; i++) ctx.lineTo(p[i][0] + dx, p[i][1] + dy);
       ctx.closePath();
+    }
+  },
+
+  _color(st) {
+    return GROUP[st[0]].types[st.slice(2)][1];
+  },
+
+  _dots(it, s, px, py, out) {
+    const sh = this.shapeOf(it);
+    if (!sh || !sh.l) return;
+    const lv = it === this._sel && this._level != null ? lootLevels(sh.l) : null;
+    for (const [lx, lz, y, ci] of sh.l) {
+      if (lv && lv.of(y) !== this._level) continue;
+      out.push([...this._local(it, lx, lz, s, px, py), this._dotStyle ? this._dotStyle(it, ci) : "#fff"]);
     }
   },
 
   _draw() {
     const ctx = this._ctx;
     const s = this._scale();
-    const usages = this._usages;
     const rings = [];
     if (s >= FOOTPRINT_SCALE) {
-      const byStyle = new Map(), badges = [], dots = [];
+      const flat = new Map(), roofs = [], badges = [], dots = [];
       const showDots = s >= LOOT_DOT_SCALE && this._shapes;
+      const useRoofs = s >= ROOF_SCALE && this._shapes;
+      if (useRoofs && !roofAtlas.data) loadRoofs().then(() => this.redraw());
       this._visible((it, st) => {
         const [px, py] = this._toLayer(it.x, it.z);
-        if (!byStyle.has(st)) byStyle.set(st, []);
+        const sh = this.shapeOf(it);
         const loops = this._loops(it).map((lp) => lp.map(([lx, lz]) => this._local(it, lx, lz, s, px, py)));
-        byStyle.get(st).push(loops);
-        if (this._focus) rings.push([it, loops]);
+        const under = useRoofs && this.showUnder(it) ? sh.u.map((lp) => lp.map(([lx, lz]) => this._local(it, lx, lz, s, px, py))) : null;
+        const sprite = useRoofs && roofSprite(sh, it.ti, it.yaw, this._color(st), !!under);
+        if (sprite) roofs.push({ it, st, loops, under, sprite, sh, px, py });
+        else {
+          if (!flat.has(st)) flat.set(st, []);
+          flat.get(st).push(loops);
+        }
+        if (this._focus || it.ti === this._hiType) rings.push([it, loops]);
         const [, x0, z0, x1, z1] = it.t;
         const minSide = Math.min(x1 - x0, z1 - z0) * s;
-        if (showDots) {
-          for (const [lx, lz, ci] of (this._shapes[it.ti] && this._shapes[it.ti].l) || []) {
-            dots.push([...this._local(it, lx, lz, s, px, py), this._dotStyle ? this._dotStyle(it, ci) : "#fff"]);
-          }
-        } else if (minSide >= 16) {
+        if (showDots || (it === this._sel && this._shapes)) this._dots(it, s, px, py, dots);
+        else if (minSide >= 16 || it.bk) {
           const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
-          badges.push([st, ...this._local(it, cx, cz, s, px, py), Math.min(9, minSide / 2.6)]);
+          badges.push([st, ...this._local(it, cx, cz, s, px, py), Math.max(it.bk ? 5 : 0, Math.min(9, minSide / 2.6))]);
         }
       });
-      for (const [st, list] of byStyle) {
-        const color = GROUPS[0].types[usages[st]][1];
+      // soft shadows towards the south-east, as long as the building is high (capped), under all roofs
+      if (roofs.length) {
+        ctx.beginPath();
+        for (const r of roofs) {
+          const off = Math.min(8, Math.max(0.6, r.sh.h || 3) * 0.35) * s;
+          this._path(ctx, r.loops, off, off);
+        }
+        ctx.fillStyle = "rgba(10,8,6,0.28)";
+        ctx.fill();
+      }
+      for (const [st, list] of flat) {
         ctx.beginPath();
         for (const loops of list) this._path(ctx, loops);
         ctx.globalAlpha = showDots ? 0.45 : 0.6;
-        ctx.fillStyle = color;
+        ctx.fillStyle = this._color(st);
         ctx.fill("evenodd");
         ctx.globalAlpha = 1;
         ctx.lineWidth = 1.5;
         ctx.strokeStyle = "rgba(15,12,8,0.9)";
         ctx.stroke();
       }
+      for (const r of roofs) {
+        const { it, sh, sprite } = r;
+        ctx.save();
+        ctx.beginPath();
+        this._path(ctx, r.loops);
+        if (r.under) this._path(ctx, r.under);
+        ctx.clip("evenodd");
+        ctx.transform(s * it.cos, s * it.sin, s * it.sin, -s * it.cos, r.px, r.py);
+        ctx.drawImage(sprite, sh.r[4], sh.r[5], sh.r[2] * ROOF_CELL, sh.r[3] * ROOF_CELL);
+        ctx.restore();
+        ctx.beginPath();
+        this._path(ctx, r.loops);
+        ctx.lineWidth = 2.5;
+        ctx.strokeStyle = "rgba(15,12,8,0.85)";
+        ctx.stroke();
+        ctx.lineWidth = 1.2;
+        ctx.strokeStyle = this._color(r.st);
+        ctx.stroke();
+        if (r.under) {
+          ctx.beginPath();
+          this._path(ctx, r.under);
+          ctx.setLineDash([4, 3]);
+          ctx.lineWidth = 1.2;
+          ctx.strokeStyle = "rgba(200,215,230,0.9)";
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
       for (const [it, loops] of rings) {
         ctx.beginPath();
         this._path(ctx, loops);
         this._ring(ctx, it);
       }
+      if (this._sel && this._shown(this._sel)) {
+        const it = this._sel, [px, py] = this._toLayer(it.x, it.z);
+        ctx.beginPath();
+        this._path(ctx, this._loops(it).map((lp) => lp.map(([lx, lz]) => this._local(it, lx, lz, s, px, py))));
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = "rgba(0,0,0,0.6)";
+        ctx.stroke();
+        ctx.lineWidth = 2.2;
+        ctx.strokeStyle = "#fff";
+        ctx.stroke();
+      }
       // loot points: dim ones first, so matching (bright) ones stay on top
-      const r = Math.max(1.6, Math.min(3.5, s * 0.45));
+      const r = Math.max(1.6, Math.min(4.5, s * 0.45));
       dots.sort((a, b2) => (a[2] === DIM_DOT) - (b2[2] === DIM_DOT)).reverse();
       for (const [x, y, color] of dots) {
         ctx.beginPath();
@@ -419,35 +655,44 @@ const BuildingLayer = CanvasLayer.extend({
         ctx.strokeStyle = "rgba(0,0,0,0.8)";
         ctx.stroke();
       }
-      for (const [st, x, y, br] of badges) drawSprite(ctx, badge("b", usages[st], Math.round(br * 2) / 2), x, y);
+      for (const [st, x, y, br] of badges) drawSprite(ctx, badge(st[0], st.slice(2), Math.round(br * 2) / 2), x, y);
     } else {
       const r = Math.round(this._badgeRadius() * 2) / 2;
       const list = [];
       this._visible((it, st) => list.push([st, it]));
-      // high-priority types (or, when focused, the best loot spots) drawn last, on top
+      // high-priority types (or, when focused, the best loot spots) drawn last, on top; the selection last of all
       if (this._focus) list.sort((a, b2) => this._focus[a[1].i] - this._focus[b2[1].i]);
-      else list.sort((a, b2) => b2[0] - a[0]);
+      else list.sort((a, b2) => this._rank(b2[0]) - this._rank(a[0]));
+      list.sort((a, b2) => (a[1] === this._sel) - (b2[1] === this._sel));
       for (const [st, it] of list) {
         const [px, py] = this._toLayer(it.x, it.z);
-        if (this._focus) {
+        const br = it.bk && st[0] === "k" ? Math.max(r, 5.5) : r;
+        if (this._focus || it.ti === this._hiType) {
           ctx.beginPath();
-          ctx.arc(px, py, r + 1.5, 0, Math.PI * 2);
+          ctx.arc(px, py, br + 1.5, 0, Math.PI * 2);
           this._ring(ctx, it);
         }
-        drawSprite(ctx, badge("b", usages[st], r), px, py);
+        if (it === this._sel) {
+          ctx.beginPath();
+          ctx.arc(px, py, br + 3, 0, Math.PI * 2);
+          ctx.lineWidth = 2.5;
+          ctx.strokeStyle = "#fff";
+          ctx.stroke();
+        }
+        drawSprite(ctx, badge(st[0], st.slice(2), br), px, py);
       }
     }
   },
 
   _ring(ctx, it) {
-    const t = Math.min(1, this._focus[it.i] / this._focusMax);
+    const t = this._focus ? Math.min(1, this._focus[it.i] / this._focusMax) : 0.8;
     ctx.lineWidth = 1.5 + 3 * t;
     ctx.strokeStyle = `rgba(255,255,255,${0.35 + 0.65 * t})`;
     ctx.stroke();
   },
 
   hitTest(latlng) {
-    if (!this._grid || (!this._mask && !this._focus)) return null;
+    if (!this._grid) return null;
     const s = this._scale();
     const x = latlng.lng, z = latlng.lat;
     let best = null, bestD = Infinity;
@@ -457,7 +702,9 @@ const BuildingLayer = CanvasLayer.extend({
         const dx = x - it.x, dz = z - it.z;
         const lx = dx * it.cos - dz * it.sin, lz = dx * it.sin + dz * it.cos;
         const [, x0, z0, x1, z1] = it.t;
-        if (lx >= x0 - tol && lx <= x1 + tol && lz >= z0 - tol && lz <= z1 + tol && insideLoops(this._loops(it), lx, lz, tol)) {
+        const near = lx >= x0 - tol && lx <= x1 + tol && lz >= z0 - tol && lz <= z1 + tol;
+        const under = s >= ROOF_SCALE && this.showUnder(it) && insideLoops(this.shapeOf(it).u, lx, lz, tol);
+        if ((near && insideLoops(this._loops(it), lx, lz, tol)) || under) {
           const d = Math.hypot(lx - (x0 + x1) / 2, lz - (z0 + z1) / 2);
           if (d < bestD) { bestD = d; best = it; }
         }
@@ -466,7 +713,7 @@ const BuildingLayer = CanvasLayer.extend({
       const maxD = (this._badgeRadius() + 2) / s;
       this._near(x, z, (it) => {
         const d = Math.hypot(x - it.x, z - it.z);
-        if (d <= maxD && d < bestD) { bestD = d; best = it; }
+        if (d <= maxD * (it.bk ? 1.4 : 1) && d < bestD) { bestD = d; best = it; }
       });
     }
     return best;
@@ -580,7 +827,8 @@ const PointLayer = CanvasLayer.extend({
 const pointLayer = new PointLayer().addTo(map);
 
 // ---- state (from URL hash) ----
-// #zoom/X/Z/base/key1.key2.../loot   keys are "<groupId>-<type>", loot = loot-finder query (optional)
+// #zoom/X/Z/base/key1.key2.../loot   keys are "<groupId>-<type>" plus the version marker, loot = loot-finder query
+const HASH_V = "v5";
 const enabled = new Set();
 for (const g of GROUPS) for (const [t, [, , on]] of Object.entries(g.types)) if (on) enabled.add(`${g.id}-${t}`);
 let initialView = null;
@@ -593,7 +841,12 @@ let initialLoot = "";
   initialView = { center: L.latLng(+zz, +x), zoom: +z };
   if (bases[b]) base = b;
   enabled.clear();
-  for (const k of (keys || "").split(".")) if (k) enabled.add(decodeURIComponent(k));
+  const list = (keys || "").split(".");
+  for (const k of list) if (k && k !== HASH_V) enabled.add(decodeURIComponent(k));
+  // links from before v5 don't know the bunker and road layers: switch those on as for a fresh visit
+  if (!list.includes(HASH_V)) {
+    for (const id of ["k", "r"]) for (const [t, [, , on]] of Object.entries(GROUP[id].types)) if (on) enabled.add(`${id}-${t}`);
+  }
   initialLoot = loot ? decodeURIComponent(loot) : "";
 })();
 
@@ -601,7 +854,7 @@ let lootQuery = "";
 function writeHash() {
   const c = map.getCenter();
   const loot = lootQuery ? `/${encodeURIComponent(lootQuery)}` : "";
-  const h = `#${map.getZoom()}/${Math.round(c.lng)}/${Math.round(c.lat)}/${base}/${[...enabled].join(".")}${loot}`;
+  const h = `#${map.getZoom()}/${Math.round(c.lng)}/${Math.round(c.lat)}/${base}/${[...enabled, HASH_V].join(".")}${loot}`;
   history.replaceState(null, "", h);
 }
 
@@ -632,17 +885,34 @@ async function buildLayer(key) {
       });
       entry.layer.addLayer(L.marker([z, x], { icon, pane: "labels", interactive: false, keyboard: false }));
     }
+  } else if (g.roads) {
+    // own canvas under the buildings; main roads and roads cased, getting as wide as the real road when zoomed in
+    const [core, metres] = { main: [3, 9], road: [2.2, 6], track: [1.2, 3] }[type];
+    const lines = data.lines.filter((l) => l.k === type).map((l) => l.p.map(([x, z]) => [z, x]));
+    const opts = { renderer: roadRenderer, interactive: false, lineCap: "round", lineJoin: "round" };
+    const cased = type !== "track";
+    const casings = cased ? lines.map((ll) => L.polyline(ll, { ...opts, color: "#4a3a28", opacity: 0.85 })) : [];
+    entry.lines = lines.map((ll, i) => [casings[i], L.polyline(ll, { ...opts, color }), core, metres]);
+    for (const c of casings) entry.layer.addLayer(c);
+    for (const [, c] of entry.lines) entry.layer.addLayer(c);
+    lineWeights(entry);
   } else if (g.lines) {
-    // thin, half-transparent lines so they don't fight with the map; pylons (sized in metres) when zoomed in
+    // cool colours (violet / sky blue) that stand out on all bases, with a thin dark casing;
+    // pylons (sized in metres) when zoomed in
     const lines = data.lines.filter((l) => l.k === type).map((l) => l.p.map(([x, z]) => [z, x]));
     const big = type === "vhv";
     const opts = { renderer, interactive: false, lineCap: "round", lineJoin: "round" };
-    for (const ll of lines) entry.layer.addLayer(L.polyline(ll, { ...opts, color, weight: big ? 2 : 1.5, opacity: 0.6 }));
+    // all casings first, so a casing never cuts across another line's core
+    const casings = lines.map((ll) => L.polyline(ll, { ...opts, color: "#0d0b09", opacity: 0.45 }));
+    entry.lines = lines.map((ll, i) => [casings[i], L.polyline(ll, { ...opts, color, opacity: 0.9 }), big ? 2.5 : 1.75]);
+    for (const c of casings) entry.layer.addLayer(c);
+    for (const [, core] of entry.lines) entry.layer.addLayer(core);
     entry.poles = L.featureGroup();
     for (const [x, z, k] of data.poles) {
       if (k !== type) continue;
-      entry.poles.addLayer(L.circle([z, x], { ...opts, radius: big ? 5 : 2, color: "#16130f", weight: 1, opacity: 0.6, fillColor: color, fillOpacity: 0.7 }));
+      entry.poles.addLayer(L.circle([z, x], { ...opts, radius: big ? 5 : 2, color: "#0d0b09", weight: 1, opacity: 0.7, fillColor: color, fillOpacity: 0.85 }));
     }
+    lineWeights(entry);
   } else {
     const types = data._types;
     const pts = (data[type] || []).map(([x, z, ti]) => ({ x, z, info: { label, cls: types[ti], x, z } }));
@@ -660,14 +930,15 @@ async function buildLayer(key) {
 }
 
 function syncBuildings() {
-  buildingLayer.setEnabled(new Set([...enabled].filter((k) => k.startsWith("b-")).map((k) => k.slice(2))));
+  const of = (id) => new Set([...enabled].filter((k) => k.startsWith(`${id}-`)).map((k) => k.slice(2)));
+  buildingLayer.setEnabled(of("b"), of("k"));
 }
 
 async function setEnabled(key, on) {
   const entry = layers[key];
   if (on) enabled.add(key);
   else enabled.delete(key);
-  if (entry.group.buildings) {
+  if (entry.group.buildings || entry.group.bunkers) {
     syncBuildings();
   } else if (on) {
     await buildLayer(key);
@@ -686,6 +957,23 @@ async function setEnabled(key, on) {
   }
   writeHash();
 }
+
+// power line / road widths follow the zoom: core weight (+0.5 px from zoom 6), casing 2 px wider
+// roads are what the terrain map lacks: full strength there, see-through over the satellite / paper map (which show
+// roads already); tracks get dashed once zoomed in
+function lineWeights(entry) {
+  if (!entry.lines) return;
+  const z = map.getZoom();
+  const road = entry.group.roads, alpha = road ? (base === "terrain" ? 1 : 0.55) : 1;
+  for (const [casing, core, w, metres] of entry.lines) {
+    // roads get as wide as the real road once that is wider than the base weight
+    const cw = Math.max(w * (road && z < 3 ? 0.7 : 1) + (z >= 6 ? 0.5 : 0), metres ? (metres * 2 ** z * 256) / WORLD : 0);
+    core.setStyle({ weight: cw, ...(road && { opacity: alpha, dashArray: !casing && z >= 5 ? "6 5" : null }) });
+    if (casing) casing.setStyle({ weight: cw + 2, ...(road && { opacity: 0.85 * alpha }) });
+  }
+}
+const allLineWeights = () => { for (const entry of Object.values(layers)) lineWeights(entry); };
+map.on("zoomend", allLineWeights);
 
 // pylons only from zoom 6: further out they are sub-pixel and turn the lines into dotted ones
 function syncPoles() {
@@ -714,37 +1002,532 @@ function popupHtml({ label, cls, x, z }) {
   return `<b>${esc(label)}</b>${sub}<div class="sub">${coordText(x, z)}</div>`;
 }
 
-function buildingPopupHtml(it) {
-  const types = buildingLayer.usagesOf(it).map((u) => {
-    const [label, color] = GROUPS[0].types[u];
-    return `<span class="tag"><i style="background:${color}"></i>${esc(label)}</span>`;
-  }).join("");
-  let extra = "";
-  const data = loot.data;
-  if (data) {
-    const tiers = data.values.filter((v, i) => data.bt[it.i] & (1 << i)).map((v) => v.replace("Tier", "Tier "));
-    const proto = data.protos[it.ti];
-    const spots = proto ? proto[1].reduce((a, c) => a + c[2], 0) : 0;
-    extra += `<div class="sub">${tiers.length ? `Zone: ${esc(tiers.join(", "))} · ` : ""}` +
-      (proto ? `${spots} loot spots · up to ${proto[0]} items` : "no loot spawns") + "</div>";
-    if (loot.scores && loot.scores[it.i] > 0) {
-      extra += `<div class="find">${esc(loot.label)}: ${(100 * loot.scores[it.i] / loot.total).toFixed(2)}% of the map's spawn chance</div>`;
-    }
-    if (proto) {
-      // what this building gives, by category and the most likely items (share of its loot)
-      const items = buildingItems(data, it.i, it.ti);
-      const total = [...items.values()].reduce((a, b) => a + b, 0);
-      const cats = new Map();
-      for (const [x, n] of items) cats.set(x[1], (cats.get(x[1]) || 0) + n);
-      const pct = (n) => `${Math.round((100 * n) / total)}%`;
-      const top = [...items].sort((a, b) => b[1] - a[1]).slice(0, 8);
-      extra += `<div class="loot-cats">${[...cats].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([c, n]) =>
-        `<span>${esc(CAT_LABELS[data.cats[c]] || data.cats[c])} <b>${pct(n)}</b></span>`).join("")}</div>` +
-        `<ol class="loot-items">${top.map(([x, n]) => `<li><span>${esc(x[7] || x[0])}</span><b>${(100 * n / total).toFixed(1)}%</b></li>`).join("")}</ol>`;
+// ---- building inspector popup ----
+// Friendly names: a few notable classes by hand, the rest by rules over the class name.
+const BUILDING_NAMES = {
+  PoliceStation_Large_Takistan: "Police station (large)", PoliceStation_Small_Takistan: "Police station",
+  HealthCare_Takistan: "Health clinic", Hospital_Takistan: "Hospital", City_FireStation_Takistan: "Fire station",
+  Mil_Airfield_HQ: "Airfield HQ", Mil_ATC_Small_Desert: "Air traffic control tower", Airfield_Hangar_Desert: "Airfield hangar",
+  Airport_Small_Hangar2: "Small hangar", Airfield_Radar_Tall: "Radar tower", Mil_GuardTower: "Guard tower",
+  Mil_ContainerWatchTower: "Container watchtower", Mil_GuardShed: "Guard shed", Mil_GuardBox_Brown: "Guard box",
+  Mil_GuardBox_Smooth: "Guard box", Mil_Fortified_Nest_Small: "Fortified nest", Mil_Fortified_Nest_Watchtower_Desert: "Fortified watchtower",
+  HBarrierTower_TK: "HESCO watchtower", Mil_ContainerHabitat_Armory: "Container armory", Mil_ContainerHabitat_Medical: "Container med bay",
+  Mil_ContainerHabitat_Office: "Container office", Medical_Tent_Big: "Field hospital tent", Medical_Tent_Shower: "Decontamination shower tent",
+  Tisy_Barracks: "Barracks (Tisy type)", Tisy_HQ: "Military HQ (Tisy type)", Tisy_KitchenRoom: "Military kitchen",
+  RocketBase_Barracks: "Rocket base barracks", RocketBase_FuelTank: "Rocket fuel tank", RocketBase_FuelTank_Camo: "Rocket fuel tank (camo)",
+  RocketBase_Garages: "Rocket base garages", RocketBase_MissileStorage: "Missile storage", RocketBase_MissileStorage2: "Missile storage",
+  ResearchInstitute_Mirnyy: "Research institute", Radio_building: "Radio station", Power_Station: "Power station", Water_Station: "Water station",
+  Repair_Center: "Repair centre", Store_CarService: "Car service", Store_Street1: "Street shop", Store_Street2: "Street shop (2 floors)",
+  FuelStation_Build_Takistan: "Fuel station", Workshop_FuelStation: "Fuel station workshop", Bazaar_Corner: "Bazaar (corner)",
+  Bazaar_Flat_Half: "Bazaar stall row", Bazaar_Left: "Bazaar", Caravanserai_Back: "Caravanserai (back)", Caravanserai_Front: "Caravanserai (front)",
+  Villa: "Villa", Mosque_Big_Main: "Grand mosque", Mosque_Big_Minaret2: "Minaret", Mosque_Big_Gate: "Mosque gate", Mosque_Big_Side: "Mosque side hall",
+  Mosque_Big_Wall: "Mosque wall", Mosque_Big_Wall_Corner: "Mosque wall (corner)", TajbegPalace_Left: "Tajbeg Palace, west wing",
+  TajbegPalace_Middle: "Tajbeg Palace, centre", TajbegPalace_Right: "Tajbeg Palace, east wing", TajbegPalace_Platform_Basement_01: "Tajbeg Palace basement",
+  TajbegPalace_Platform_Basement_02: "Tajbeg Palace basement", Castle_Bastion2_Desert: "Castle bastion", Mausoleum_Small1: "Mausoleum",
+  Mausoleum_Small2: "Mausoleum", KirovDam_PowerPlant: "Dam power plant", KirovDam_House_A: "Dam house", KirovDam_House_B: "Dam house",
+  KirovDam_Outlet_A: "Dam outlet", KirovDam_Outlet_B: "Dam outlet", Bunker_Shelter_Storage: "Bunker shelter, storage",
+  Bunker_Shelter_Medical: "Bunker shelter, medical", Bunker_Shelter_Office: "Bunker shelter, office", Bunker_Basement_Storage: "Basement bunker, storage",
+  Bunker_Basement_Medical: "Basement bunker, medical", Bunker_Basement_Civilian: "Basement bunker, civilian", Tunnel_Single_Bunker: "Tunnel bunker",
+  Tunnel_Maintenance_Room: "Tunnel maintenance room", Tunnel_Medical_Room: "Tunnel medical room", Oil_DrillTower: "Oil drill tower",
+  Quarry_Main: "Quarry", Sawmill_Building: "Sawmill", Sawmill_Illuminanttower: "Sawmill floodlight tower", Factory_Lathes: "Machine shop",
+  Factory_Small: "Small factory", Farm_Hopper2: "Grain hopper", Construction_Building: "Building site", Construction_Crane: "Construction crane",
+  Construction_House1: "House under construction", Construction_House2: "House under construction", Misc_WoodenCrate_Spawn: "Wooden crate",
+  Misc_Toilet_Dry: "Outhouse", Misc_Scaffolding: "Scaffolding", Boat_Small1: "Small boat", Pier_Crane_A: "Pier crane", Pier_Crane_B: "Pier crane",
+  BusStation_building: "Bus station", BusStation_wall_bench: "Bus station shelter", BusStop_City: "Bus stop", Guardhouse: "Guardhouse",
+  Garage_Big: "Big garage", Garage_Office: "Garage office", Garage_Row_Big: "Garage row", Garage_Row_Small: "Garage row (small)",
+  Garage_Small: "Small garage", Garage_Tall: "Tall garage", Office1: "Office building", Office2: "Office block", HouseBlock_2C1: "Apartment block",
+  HouseBlock_2C_Corner: "Apartment block (corner)", DieselPowerPlant_Tank_Small: "Diesel tank", Shed_Closed: "Warehouse", Shed_Closed2: "Warehouse",
+};
+const WRECKS = { pickup01: "pickup", sed01: "Olga sedan", sed02: "Sarka sedan", hb01: "Gunter hatchback", hb02: "hatchback", uaz: "UAZ",
+  offroad02: "M1025 Humvee", caravan: "caravan", trailer: "trailer", ikarus: "Ikarus bus", truck01: "V3S truck" };
+const BUILDING_RULES = [
+  [/^House_(\d)[A-Z]\d/, (m) => (m[1] === "1" ? "Single-storey house" : `${m[1]}-storey house`)],
+  [/^Wreck_?(\w+?)_/i, (m) => `Wreck: ${WRECKS[m[1].toLowerCase()] || m[1]}`],
+  [/^wreck_(truck01)/i, () => "Wreck: V3S truck"],
+  [/^Mil_Barracks/, () => "Barracks"], [/^Mil_Guard[Hh]ouse/, () => "Military guardhouse"], [/^Border_/, () => "Border guardhouse"],
+  [/^Mil_Tent_Big/, () => "Military tent"], [/^Refugee_Tent/, () => "Refugee tent"], [/^Refugee_ContainerHabitat/, () => "Refugee container"],
+  [/^TradTent_(\w+?)\d?$/, (m) => `Traditional tent (${m[1].toLowerCase()})`], [/^Slum_House/, () => "Slum house"],
+  [/^Shed_W/, () => "Wooden shed"], [/^Shed_M/, () => "Metal shed"], [/^Shed_Closed_Small/, () => "Small warehouse"],
+  [/^Workshop\d/, () => "Workshop"], [/^Container_1/, () => "Shipping container"], [/^CementWorks_(\w+)/, (m) => `Cement works: ${m[1].replace(/_/g, " ").replace(/([a-z])([A-Z0-9])/g, "$1 $2").toLowerCase()}`],
+  [/^Smokestack/, () => "Smokestack"], [/^WaterTower/, () => "Water tower"], [/^Tower_TC/, () => "Tower"], [/^Villa/, () => "Villa"],
+  [/^Mausoleum/, () => "Mausoleum"], [/^HouseBlock/, () => "Apartment block"], [/^Store_Street/, () => "Street shop"], [/^Store_CarService/, () => "Car service"],
+];
+function buildingName(cls) {
+  const damaged = /_Dam\d/.test(cls), ruin = /_Ghost$/.test(cls);
+  const base = cls.replace(/_Dam\d$/, "").replace(/_Ghost$/, "");
+  let name = BUILDING_NAMES[base];
+  if (!name) {
+    for (const [re, fn] of BUILDING_RULES) {
+      const m = base.match(re);
+      if (m) { name = fn(m); break; }
     }
   }
-  return `<b>${esc(prettyClass(it.t[0]))}</b><div class="tags">${types}</div>${extra}<div class="sub">${coordText(it.x, it.z)}</div>`;
+  name ??= prettyClass(base);
+  return name + (ruin ? " (ruin)" : damaged ? " (damaged)" : "");
 }
+
+// nearest named place (towns, villages, local names; not hills or rivers), with distance and direction from it
+const COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+function placeNear(names, x, z) {
+  let best = null, bd = Infinity;
+  for (const [name, kind, nx, nz] of names) {
+    if (kind === "Hill" || kind === "Marine") continue;
+    const d = Math.hypot(nx - x, nz - z);
+    if (d < bd) { bd = d; best = { name, d, dir: COMPASS[Math.round((((Math.atan2(x - nx, z - nz) * 180) / Math.PI + 360) % 360) / 45) % 8] }; }
+  }
+  return best;
+}
+
+// loot point kinds, from the proto container (name, tags, categories): [label, colour]
+const DOT_KINDS = [["Floor", "#ffffff"], ["Shelves", "#7fd3ff"], ["Weapon racks", "#ff9f43"], ["Floor & shelves", "#c4b5fd"]];
+function dotKind(c) {
+  const data = loot.data;
+  if (!c || !data) return 0;
+  const tag = (t) => (c[1] >> data.tags.indexOf(t)) & 1;
+  const armsOnly = !(c[0] & ~((1 << data.cats.indexOf("weapons")) | (1 << data.cats.indexOf("explosives"))));
+  if (/weap/i.test(c[4] || "") || armsOnly) return 2;
+  if (tag("shelves")) return tag("floor") ? 3 : 1;
+  return 0;
+}
+
+// top-down plan of one building, north up, fitted to the canvas: roof render + loot points (one level or all).
+// opts: w, h (CSS px), mini (thumbnail: no north arrow / scale bar, small dots)
+function drawPlan(cv, it, level, opts = {}) {
+  const d = dpr(), W = opts.w || 252, H = opts.h || 156, mini = !!opts.mini, pad = mini ? 8 : 24;
+  cv.width = W * d;
+  cv.height = H * d;
+  cv.style.width = `${W}px`;
+  cv.style.height = `${H}px`;
+  const ctx = cv.getContext("2d");
+  ctx.scale(d, d);
+  const sh = buildingLayer.shapeOf(it) || {};
+  const loops = buildingLayer._loops(it), under = buildingLayer.showUnder(it) ? sh.u : [];
+  const color = buildingLayer._color(buildingLayer._style(it));
+  const lv = lootLevels(sh.l || []);
+  const pts = (sh.l || []).filter((p) => level == null || lv.of(p[2]) === level);
+  let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+  for (const [lx, lz] of [...loops.flat(), ...under.flat(), ...(sh.l || [])]) {
+    const wx = lx * it.cos + lz * it.sin, wz = -lx * it.sin + lz * it.cos;
+    x0 = Math.min(x0, wx); x1 = Math.max(x1, wx); z0 = Math.min(z0, wz); z1 = Math.max(z1, wz);
+  }
+  const k = Math.min((W - pad) / Math.max(1, x1 - x0), (H - pad) / Math.max(1, z1 - z0), mini ? 10 : 16);
+  const cx = W / 2 - (k * (x0 + x1)) / 2, cy = H / 2 + (k * (z0 + z1)) / 2;
+  const loc = (lx, lz) => buildingLayer._local(it, lx, lz, k, cx, cy);
+  const path = (ls) => { for (const p of ls) { ctx.moveTo(...loc(...p[0])); for (const q of p.slice(1)) ctx.lineTo(...loc(...q)); ctx.closePath(); } };
+  const sprite = roofSprite(sh, it.ti, it.yaw, color, under.length > 0);
+  ctx.beginPath();
+  path(loops);
+  path(under);
+  if (sprite) {
+    ctx.save();
+    ctx.clip("evenodd");
+    ctx.transform(k * it.cos, k * it.sin, k * it.sin, -k * it.cos, cx, cy);
+    ctx.drawImage(sprite, sh.r[4], sh.r[5], sh.r[2] * ROOF_CELL, sh.r[3] * ROOF_CELL);
+    ctx.restore();
+  } else {
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = color;
+    ctx.fill("evenodd");
+    ctx.globalAlpha = 1;
+  }
+  ctx.beginPath();
+  path(loops);
+  ctx.lineWidth = mini ? 1.5 : 2.5;
+  ctx.strokeStyle = "rgba(15,12,8,0.85)";
+  ctx.stroke();
+  ctx.lineWidth = mini ? 0.8 : 1.2;
+  ctx.strokeStyle = color;
+  ctx.stroke();
+  if (under.length) {
+    ctx.beginPath();
+    path(under);
+    ctx.setLineDash([4, 3]);
+    ctx.strokeStyle = "rgba(200,215,230,0.9)";
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  const r = mini ? Math.max(1.3, Math.min(2.2, k * 0.25)) : Math.max(2.2, Math.min(4.5, k * 0.35));
+  for (const [lx, lz, , ci] of pts) {
+    ctx.beginPath();
+    ctx.arc(...loc(lx, lz), r, 0, Math.PI * 2);
+    ctx.fillStyle = buildingLayer._dotStyle ? buildingLayer._dotStyle(it, ci) : "#fff";
+    ctx.fill();
+    ctx.lineWidth = mini ? 0.6 : 1;
+    ctx.strokeStyle = "rgba(0,0,0,0.85)";
+    ctx.stroke();
+  }
+  if (!mini) {
+    // north arrow and scale bar
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.font = "600 10px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("N", W - 10, 12);
+    ctx.beginPath();
+    ctx.moveTo(W - 10, 15); ctx.lineTo(W - 13.5, 22); ctx.lineTo(W - 6.5, 22); ctx.closePath();
+    ctx.fill();
+    const len = [1, 2, 5, 10, 20, 50].filter((m) => m * k <= 70).pop() || 1;
+    ctx.fillRect(8, H - 9, len * k, 2);
+    ctx.textAlign = "left";
+    ctx.fillText(`${len} m`, 8, H - 12);
+  }
+  if (!roofAtlas.data) loadRoofs().then(() => cv.isConnected && drawPlan(cv, it, level, opts));
+}
+
+// a building class as a stand-in item (its model orientation, usage/tier of its first instance), for the catalogue
+const firstOfType = new Map();
+function typeItem(ti) {
+  if (!firstOfType.size) for (const it of buildingLayer._items) if (!firstOfType.has(it.ti)) firstOfType.set(it.ti, it);
+  const f = firstOfType.get(ti);
+  return { ti, t: buildingLayer._types[ti], yaw: 0, cos: 1, sin: 0, bk: f.bk, mask: f.mask, i: f.i, x: f.x, z: f.z };
+}
+
+// everything the popup / catalogue says about a building
+function buildingFacts(it) {
+  const sh = buildingLayer.shapeOf(it) || {};
+  const data = loot.data, proto = data && data.protos[it.ti], pts = sh.l || [];
+  let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+  for (const [lx, lz] of buildingLayer._loops(it).flat()) { x0 = Math.min(x0, lx); x1 = Math.max(x1, lx); z0 = Math.min(z0, lz); z1 = Math.max(z1, lz); }
+  const [w, l] = [x1 - x0, z1 - z0].sort((a, b) => a - b);
+  const under = buildingLayer.showUnder(it);
+  const ringArea = (p) => p.reduce((a, q, i) => { const n = p[(i + 1) % p.length]; return a + q[0] * n[1] - n[0] * q[1]; }, 0) / 2;
+  return {
+    sh, proto, pts, lv: lootLevels(pts), name: buildingName(it.t[0]), w, l, area: sh.a, height: sh.h,
+    underArea: under ? Math.abs(sh.u.reduce((a, p) => a + ringArea(p), 0)) : 0,
+    depth: Math.max(under ? sh.d || 0 : 0, -Math.min(0, ...pts.map((p) => p[2] - 0.2))),
+    spots: proto ? proto[1].reduce((a, c) => a + c[2], 0) : 0, maxItems: proto ? proto[0] : 0,
+    count: buildingLayer._typeCount.get(it.ti) || 1,
+    tiers: data ? data.values.filter((v, i) => data.bt[it.i] & (1 << i)).map((v) => v.replace("Tier", "Tier ")) : [],
+  };
+}
+
+function tagsHtml(it) {
+  const tags = buildingLayer.usagesOf(it).map((u) => {
+    const [label, color] = GROUP.b.types[u];
+    return `<span class="tag"><i style="background:${color}"></i>${esc(label)}</span>`;
+  });
+  if (it.bk) {
+    const [label, color] = GROUP.k.types[it.bk];
+    tags.unshift(`<span class="tag"><i style="background:${color}"></i>${esc(label)}</span>`);
+  }
+  return `<div class="tags">${tags.join("")}</div>`;
+}
+
+function bunkerNoteHtml(it) {
+  if (it.bk === "shelter" || it.bk === "basement") {
+    const bc = buildingLayer._broadcast;
+    const when = bc ? bc.periods.map(([a, b]) => `${a.slice(0, 2)}:${a.slice(2)}–${b.slice(0, 2)}:${b.slice(2)}`).join(", ") : "";
+    return `<div class="bunker-note"><b>Code-locked bunker</b>${bc ? `${bc.codeLength}-digit keypad, code broadcast in Morse on the radio ` +
+      `${when} (in-game). ${bc.active} of ${bc.sites} bunkers active at a time.` : ""}</div>`;
+  }
+  if (it.bk === "tunnel") return `<div class="bunker-note"><b>Tunnel bunker</b>Underground military rooms off a tunnel, no keypad.</div>`;
+  return "";
+}
+
+// one line: size · height · spots · tier
+function summaryLine(f) {
+  return [`${Math.round(f.l)} × ${Math.round(f.w)} m`, f.height ? `${f.height.toFixed(0)} m tall` : "",
+    f.depth >= 1.5 ? `${f.depth.toFixed(0)} m underground` : "", f.spots ? `${f.spots} loot spots` : "no loot", f.tiers.join(", ")]
+    .filter(Boolean).join(" · ");
+}
+
+function factsHtml(f, withLocation) {
+  const chips = [
+    ["Size", `${Math.round(f.l)} × ${Math.round(f.w)} m`],
+    f.area ? ["Area", `${f.area.toLocaleString()} m²`] : null,
+    f.underArea >= 4 ? ["Below ground", `${Math.round(f.underArea).toLocaleString()} m²`] : null,
+    f.height ? ["Height", `${f.height.toFixed(1)} m`] : null,
+    f.depth >= 1.5 ? ["Underground", `${f.depth.toFixed(0)} m deep`] : null,
+    ["Loot spots", f.spots ? String(f.spots) : "none"],
+    f.maxItems ? ["Max items", String(f.maxItems)] : null,
+    f.lv.levels.length ? ["Loot levels", f.lv.levels.map((x) => x.label).join(" · ")] : null,
+    ["On Nasdara", f.count === 1 ? "unique" : withLocation ? `1 of ${f.count}` : `${f.count} placed`],
+    f.tiers.length ? ["Zone", f.tiers.join(", ")] : null,
+    withLocation ? ["Location", `<span class="loc">…</span>`] : null,
+  ];
+  return `<dl class="chips">${chips.filter(Boolean).map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl>`;
+}
+
+// category bars + most likely items (share of this building's loot)
+function lootHtml(it, top) {
+  const data = loot.data, proto = data && data.protos[it.ti];
+  if (!proto) return `<p class="sub">No loot spawns in this building.</p>`;
+  const items = buildingItems(data, it.i, it.ti);
+  const total = [...items.values()].reduce((a, b) => a + b, 0);
+  const cats = new Map();
+  for (const [x, v] of items) cats.set(x[1], (cats.get(x[1]) || 0) + v);
+  return `<div class="cat-bars">${[...cats].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([c, v]) => {
+    const p = (100 * v) / total;
+    return `<div><span>${esc(CAT_LABELS[data.cats[c]] || data.cats[c])}</span><i style="--w:${p.toFixed(1)}%"></i><b>${Math.round(p)}%</b></div>`;
+  }).join("")}</div>` +
+    `<ol class="loot-items">${[...items].sort((a, b) => b[1] - a[1]).slice(0, top).map(([x, v]) =>
+      `<li><span>${esc(x[7] || x[0])}</span><b>${(100 * v / total).toFixed(1)}%</b></li>`).join("")}</ol>`;
+}
+
+// plan canvas + legend + level buttons inside el; sync = also filter the dots on the map
+function planBlock(el, it, opts = {}) {
+  const f = buildingFacts(it);
+  let html = `<div class="plan"><canvas></canvas></div>`;
+  if (f.pts.length) {
+    const counts = DOT_KINDS.map(() => 0);
+    for (const p of f.pts) counts[dotKind(f.proto && f.proto[1][p[3]])]++;
+    html += `<div class="plan-legend">${DOT_KINDS.map(([label, color], i) => counts[i] ? `<span><i style="background:${color}"></i>${label} ${counts[i]}</span>` : "").join("")}` +
+      `${loot.sums ? `<span><i style="background:#7cfc00"></i>${esc(loot.label)}</span>` : ""}</div>`;
+    if (f.lv.levels.length > 1) {
+      html += `<div class="levels" role="group" aria-label="Loot level"><button type="button" class="on" data-l="">All</button>` +
+        f.lv.levels.map((x, i) => `<button type="button" data-l="${i}" title="${x.min.toFixed(1)} to ${x.max.toFixed(1)} m">${x.label}</button>`).join("") + `</div>`;
+    }
+  } else {
+    html += `<p class="sub">No loot spawns in this building.</p>`;
+  }
+  el.innerHTML = html;
+  const cv = el.querySelector("canvas");
+  let level = null;
+  const redraw = () => drawPlan(cv, it, level, opts);
+  redraw();
+  el.querySelectorAll(".levels button").forEach((b) => b.addEventListener("click", () => {
+    level = b.dataset.l === "" ? null : +b.dataset.l;
+    el.querySelectorAll(".levels button").forEach((x) => x.classList.toggle("on", x === b));
+    if (opts.sync) buildingLayer.select(it, level);
+    redraw();
+  }));
+}
+
+function placeText(p) {
+  if (!p) return "—";
+  return p.d < 450 ? `in ${p.name}` : `${p.d >= 1000 ? `${(p.d / 1000).toFixed(1)} km` : `${Math.round(p.d / 50) * 50} m`} ${p.dir} of ${p.name}`;
+}
+
+// accessible tab bar: buttons with role=tab, arrow keys move between them; onChange(id)
+function tabs(el, ids, labels, current, onChange) {
+  const bar = el.querySelector(".tabbar");
+  bar.innerHTML = ids.map((id, i) => `<button type="button" role="tab" data-tab="${id}" aria-selected="${id === current}" tabindex="${id === current ? 0 : -1}">${labels[i]}</button>`).join("");
+  const show = (id, focus) => {
+    bar.querySelectorAll("[role=tab]").forEach((b) => {
+      const on = b.dataset.tab === id;
+      b.setAttribute("aria-selected", on);
+      b.tabIndex = on ? 0 : -1;
+      if (on && focus) b.focus();
+    });
+    el.querySelectorAll("[role=tabpanel]").forEach((p) => { p.hidden = p.dataset.tab !== id; });
+    onChange(id);
+  };
+  bar.addEventListener("click", (e) => { const b = e.target.closest("[role=tab]"); if (b) show(b.dataset.tab); });
+  bar.addEventListener("keydown", (e) => {
+    const i = ids.indexOf(bar.querySelector("[aria-selected=true]").dataset.tab);
+    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+      show(ids[(i + (e.key === "ArrowRight" ? 1 : ids.length - 1)) % ids.length], true);
+      e.preventDefault();
+    }
+  });
+  show(current);
+}
+
+let popupTab = "plan"; // remembered between popups
+function buildingPopup(it) {
+  const el = document.createElement("div");
+  el.className = "bpop";
+  const f = buildingFacts(it);
+  const data = loot.data;
+  const find = data && loot.scores && loot.scores[it.i] > 0
+    ? `<div class="find">${esc(loot.label)}: ${(100 * loot.scores[it.i] / loot.total).toFixed(2)}% of the map's spawn chance</div>` : "";
+  const typeBtn = () => (buildingLayer._hiType === it.ti ? "Stop showing this type" : f.count > 1 ? `Show all ${f.count} on the map` : "Highlight on the map");
+  el.innerHTML = `<header><b>${esc(f.name)}</b><div class="sub cls">${esc(it.t[0])}</div>${tagsHtml(it)}` +
+    `<div class="summary">${esc(summaryLine(f))}</div>${bunkerNoteHtml(it)}${find}</header>` +
+    `<div class="tabbar" role="tablist" aria-label="Building details"></div>` +
+    `<div role="tabpanel" data-tab="plan" class="tab-plan"></div>` +
+    `<div role="tabpanel" data-tab="loot">${lootHtml(it, 10)}</div>` +
+    `<div role="tabpanel" data-tab="info">${factsHtml(f, true)}<div class="sub">${coordText(it.x, it.z)}</div>` +
+    `<div class="pop-actions"><button type="button" class="show-type">${typeBtn()}</button>` +
+    `<button type="button" class="open-cat">Open in catalogue</button></div></div>`;
+  planBlock(el.querySelector(".tab-plan"), it, { sync: true });
+  tabs(el, ["plan", "loot", "info"], ["Top view", "Loot", "Info"], popupTab, (id) => { popupTab = id; });
+  el.querySelector(".show-type").addEventListener("click", (e) => {
+    buildingLayer.highlightType(buildingLayer._hiType !== it.ti ? it.ti : null);
+    e.target.textContent = typeBtn();
+  });
+  el.querySelector(".open-cat").addEventListener("click", () => openCatalog(it.ti));
+  loadData("names").then((names) => {
+    const loc = el.querySelector(".loc");
+    if (loc) loc.textContent = placeText(placeNear(names, it.x, it.z));
+  });
+  return el;
+}
+
+function openBuildingPopup(it, latlng) {
+  L.popup({ maxWidth: 300, minWidth: 262, maxHeight: Math.max(280, Math.min(640, innerHeight - 120)), autoPanPadding: [16, 16] })
+    .setLatLng(latlng || [it.z, it.x]).setContent(buildingPopup(it)).openOn(map);
+  buildingLayer.select(it);
+}
+
+// ---- building catalogue: every building type in a window over the map ----
+const catalog = { el: document.getElementById("catalog"), built: false, filter: "all", q: "", sort: "count", scroll: 0 };
+let lastFocus = null;
+
+async function openCatalog(ti = null) {
+  lastFocus = document.activeElement;
+  catalog.el.hidden = false;
+  document.body.classList.add("catalog-open");
+  const [, shapes, names] = await Promise.all([loadData("buildings"), loadData("shapes"), loadData("names"), lootData(), loadRoofs()]);
+  if (!buildingLayer._items) buildingLayer.setData(await loadData("buildings"));
+  if (!buildingLayer._shapes) buildingLayer.setShapes(shapes);
+  catalog.names = names;
+  if (!catalog.built) buildCatalog();
+  if (ti != null) catalogDetail(ti);
+  else catalogGrid();
+}
+
+function closeCatalog() {
+  if (catalog.el.hidden) return;
+  catalog.scroll = catalog.el.querySelector(".cat-body").scrollTop;
+  catalog.el.hidden = true;
+  document.body.classList.remove("catalog-open");
+  if (lastFocus && lastFocus.isConnected) lastFocus.focus();
+}
+
+function buildCatalog() {
+  const el = catalog.el;
+  const usages = buildingLayer._usages.filter((u) => buildingLayer._items.some((it) => it.mask & (1 << buildingLayer._usages.indexOf(u))));
+  catalog.filters = [["all", "All"], ["bunkers", "Bunkers"], ...usages.map((u) => [u, GROUP.b.types[u][0].replace(" (wrecks etc.)", " / wrecks")])];
+  el.innerHTML = `<div class="cat-win">
+    <header class="cat-head">
+      <h2 id="catalog-title">Buildings</h2>
+      <input class="cat-q" type="search" placeholder="Search buildings…" aria-label="Search buildings" autocomplete="off" spellcheck="false">
+      <select class="cat-sort" aria-label="Sort">
+        <option value="count">Most common</option><option value="spots">Most loot spots</option>
+        <option value="area">Largest</option><option value="name">Name</option>
+      </select>
+      <button type="button" class="cat-close" aria-label="Close">✕</button>
+    </header>
+    <div class="cat-filters" role="group" aria-label="Filter">${catalog.filters.map(([id, label]) =>
+      `<button type="button" data-f="${id}">${esc(label)}</button>`).join("")}</div>
+    <div class="cat-body"></div>
+  </div>`;
+  el.querySelector(".cat-close").addEventListener("click", closeCatalog);
+  el.addEventListener("click", (e) => { if (e.target === el) closeCatalog(); });
+  el.querySelector(".cat-q").addEventListener("input", (e) => { catalog.q = e.target.value.trim().toLowerCase(); catalogGrid(true); });
+  el.querySelector(".cat-sort").addEventListener("change", (e) => { catalog.sort = e.target.value; catalogGrid(true); });
+  el.querySelector(".cat-filters").addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (b) { catalog.filter = b.dataset.f; catalogGrid(true); }
+  });
+  catalog.observer = new IntersectionObserver((entries) => {
+    for (const en of entries) {
+      if (!en.isIntersecting) continue;
+      const cv = en.target;
+      catalog.observer.unobserve(cv);
+      drawPlan(cv, typeItem(+cv.dataset.ti), null, { w: 150, h: 104, mini: true });
+    }
+  }, { root: el.querySelector(".cat-body"), rootMargin: "200px" });
+  catalog.built = true;
+}
+
+function catalogTypes() {
+  const L2 = buildingLayer, q = catalog.q, f = catalog.filter;
+  const list = [];
+  for (let ti = 0; ti < L2._types.length; ti++) {
+    if (!L2._typeCount.get(ti)) continue;
+    const it = typeItem(ti), name = buildingName(it.t[0]);
+    if (q && !name.toLowerCase().includes(q) && !it.t[0].toLowerCase().includes(q)) continue;
+    if (f === "bunkers" ? !it.bk : f !== "all" && !(it.mask & (1 << L2._usages.indexOf(f)))) continue;
+    const sh = L2.shapeOf(it) || {}, proto = loot.data && loot.data.protos[ti];
+    list.push({ ti, it, name, count: L2._typeCount.get(ti), spots: proto ? proto[1].reduce((a, c) => a + c[2], 0) : 0, area: sh.a || 0 });
+  }
+  const by = { count: (a, b) => b.count - a.count, spots: (a, b) => b.spots - a.spots, area: (a, b) => b.area - a.area, name: (a, b) => a.name.localeCompare(b.name) };
+  return list.sort((a, b) => by[catalog.sort](a, b) || a.name.localeCompare(b.name));
+}
+
+function catalogGrid(reset) {
+  const el = catalog.el, body = el.querySelector(".cat-body");
+  el.querySelector(".cat-q").value = catalog.q;
+  el.querySelector(".cat-sort").value = catalog.sort;
+  el.querySelectorAll(".cat-filters button").forEach((b) => b.classList.toggle("on", b.dataset.f === catalog.filter));
+  el.querySelector(".cat-filters").hidden = false;
+  const list = catalogTypes();
+  body.innerHTML = `<p class="cat-count">${list.length} building type${list.length === 1 ? "" : "s"}</p><div class="cat-grid">${list.map((c) => {
+    const dots = buildingLayer.usagesOf(c.it).map((u) => `<i style="background:${GROUP.b.types[u][1]}" title="${esc(GROUP.b.types[u][0])}"></i>`).join("");
+    return `<button type="button" class="cat-card" data-ti="${c.ti}"><canvas data-ti="${c.ti}" width="150" height="104"></canvas>` +
+      `<span class="cat-name">${esc(c.name)}</span><span class="cat-meta">${dots}<span>×${c.count}</span><span>${c.spots ? `${c.spots} spots` : "no loot"}</span>` +
+      `${c.it.bk ? `<span class="cat-bunker">bunker</span>` : ""}</span></button>`;
+  }).join("")}</div>`;
+  body.querySelectorAll("canvas").forEach((cv) => catalog.observer.observe(cv));
+  body.querySelectorAll(".cat-card").forEach((b) => b.addEventListener("click", () => {
+    catalog.scroll = body.scrollTop;
+    catalogDetail(+b.dataset.ti);
+  }));
+  body.scrollTop = reset ? 0 : catalog.scroll;
+  if (!reset) el.querySelector(".cat-q").focus({ preventScroll: true });
+}
+
+function catalogDetail(ti) {
+  const el = catalog.el, body = el.querySelector(".cat-body");
+  el.querySelector(".cat-filters").hidden = true;
+  const it = typeItem(ti), f = buildingFacts(it);
+  // where they are: instances grouped by nearest place
+  const groups = new Map();
+  for (const b of buildingLayer._items) {
+    if (b.ti !== ti) continue;
+    const p = placeNear(catalog.names, b.x, b.z), key = p ? (p.d < 450 ? p.name : `near ${p.name}`) : "—";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(b);
+  }
+  const places = [...groups].sort((a, b) => b[1].length - a[1].length);
+  body.innerHTML = `<div class="cat-detail">
+    <button type="button" class="cat-back">← All buildings</button>
+    <div class="cat-title"><h3>${esc(f.name)}</h3><span class="sub cls">${esc(it.t[0])}</span></div>
+    ${tagsHtml(it)}${bunkerNoteHtml(it)}
+    <div class="cat-cols">
+      <div><div class="cat-plan"></div>${factsHtml(f, false)}</div>
+      <div>
+        <h4>Loot <span class="sub">(typical, ${esc(f.tiers.join(", ") || "any zone")})</span></h4>${lootHtml(it, 12)}
+        <h4>Where to find it <span class="sub">(${f.count})</span></h4>
+        <ul class="cat-places">${places.map(([name, list], i) => `<li><button type="button" data-p="${i}"><span>${esc(name)}</span>` +
+          `<span class="count">${list.length > 1 ? `×${list.length}` : coordText(list[0].x, list[0].z).split(" · grid")[0]}</span></button></li>`).join("")}</ul>
+        <div class="pop-actions"><button type="button" class="cat-showall">Show all ${f.count} on the map</button></div>
+      </div>
+    </div>
+  </div>`;
+  const planW = Math.min(460, body.clientWidth - 40);
+  planBlock(body.querySelector(".cat-plan"), it, { w: Math.max(240, planW > 700 ? 460 : planW), h: 290 });
+  body.scrollTop = 0;
+  body.querySelector(".cat-back").addEventListener("click", () => catalogGrid(false));
+  body.querySelector(".cat-showall").addEventListener("click", () => {
+    buildingLayer.highlightType(ti);
+    closeCatalog();
+    const all = buildingLayer._items.filter((b) => b.ti === ti);
+    map.flyToBounds(L.latLngBounds(all.map((b) => [b.z, b.x])).pad(0.2), { maxZoom: 6 });
+  });
+  body.querySelectorAll(".cat-places button").forEach((b) => b.addEventListener("click", () => {
+    const [, list] = places[+b.dataset.p];
+    const target = list[0];
+    if (list.length > 1) buildingLayer.highlightType(ti);
+    closeCatalog();
+    map.flyTo([target.z, target.x], 7.5);
+    map.once("moveend", () => openBuildingPopup(target));
+  }));
+  body.querySelector(".cat-back").focus({ preventScroll: true });
+}
+
+// open buttons: panel header + a map control under the zoom buttons
+document.getElementById("catalog-open").addEventListener("click", () => {
+  if (document.getElementById("panel").classList.contains("open")) toggle.click(); // phone: close the panel first
+  openCatalog();
+});
+const CatalogControl = L.Control.extend({
+  options: { position: "topleft" },
+  onAdd() {
+    const box = L.DomUtil.create("div", "leaflet-bar");
+    const a = L.DomUtil.create("a", "catalog-btn", box);
+    a.href = "#";
+    a.title = "All building types";
+    a.setAttribute("aria-label", a.title);
+    a.setAttribute("role", "button");
+    a.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M3 3h8v8H3zM13 3h8v8h-8zM3 13h8v8H3zM13 13h8v8h-8z"/></svg>`;
+    L.DomEvent.on(a, "click", (e) => { L.DomEvent.preventDefault(e); L.DomEvent.stopPropagation(e); openCatalog(); });
+    L.DomEvent.disableClickPropagation(box);
+    return box;
+  },
+});
+new CatalogControl().addTo(map);
 
 // ---- panel ----
 const panel = document.getElementById("layers");
@@ -767,7 +1550,7 @@ for (const g of GROUPS) {
   const boxes = [];
   for (const [type, [label, color, , glyph]] of Object.entries(g.types)) {
     const key = `${g.id}-${type}`;
-    if (g.buildings) {
+    if (g.buildings || g.bunkers) {
       layers[key] = { group: g, type };
     } else {
       const layer = g.labels ? L.layerGroup() : g.tiers ? null : L.featureGroup();
@@ -819,6 +1602,8 @@ for (const g of GROUPS) {
         const bit = 1 << data.usages.indexOf(type);
         return data.b.reduce((n, row) => n + ((row[4] & bit) ? 1 : 0), 0);
       };
+    } else if (g.bunkers) {
+      count = (type) => data.b.reduce((n, row) => n + (data.bunkers[row[3]] === type ? 1 : 0), 0);
     } else if (g.labels) {
       count = (type) => data.filter(([, kind]) => NAME_KIND[kind] === type).length;
     } else if (g.lines) {
@@ -846,6 +1631,7 @@ for (const input of document.querySelectorAll('input[name="base"]')) {
     bases[base].remove();
     base = input.value;
     bases[base].addTo(map).bringToBack();
+    allLineWeights();
     writeHash();
   });
 }
@@ -872,12 +1658,14 @@ const CAT_LABELS = {
   containers: "Containers", explosives: "Explosives", books: "Books", lootdispatch: "Misc (attachments, parts…)",
 };
 const loot = { data: null, scores: null, ev: null, total: 0, label: "", heat: null, sums: null };
+const BUNKER_Q = "All bunker loot";
 const itemLabel = (it) => (it[7] && it[7] !== it[0] ? `${it[7]} (${it[0]})` : it[0]);
 const eventLabel = (e) => (GROUP.e.types[e] || [e])[0];
 
 function lootQueries(data) {
   // text shown in the search box -> predicate over items; class name -> that text (for links)
   const q = new Map(), byClass = new Map();
+  q.set(BUNKER_Q, () => true); // every item, but only bunker buildings count (see runLoot)
   for (const [ci, c] of data.cats.entries()) q.set(`All ${CAT_LABELS[c] || c}`, (it) => it[1] === ci);
   for (const [label, pred] of DERIVED) q.set(`All ${label}`, pred);
   for (const it of [...data.items].sort((a, b) => itemLabel(a).localeCompare(itemLabel(b)))) {
@@ -1031,13 +1819,8 @@ const HEAT_RAMP = [[0, [40, 90, 255, 0]], [0.12, [40, 120, 255, 120]], [0.35, [0
 async function topSpots(r) {
   const names = await loadData("names");
   const nearest = (x, z) => {
-    let best = null, bd = Infinity;
-    for (const [name, kind, nx, nz] of names) {
-      if (kind === "Hill" || kind === "Marine") continue;
-      const d = Math.hypot(nx - x, nz - z);
-      if (d < bd) { bd = d; best = name; }
-    }
-    return bd < 1500 ? { name: best, near: bd >= 400 } : { name: `grid ${pad3(x)} ${pad3(z)}`, near: false };
+    const p = placeNear(names, x, z);
+    return p && p.d < 1500 ? { name: p.name, near: p.d >= 400 } : { name: `grid ${pad3(x)} ${pad3(z)}`, near: false };
   };
   // buildings: 400 m clusters named after the nearest place; clusters with the same name are merged
   const cells = new Map();
@@ -1045,15 +1828,16 @@ async function topSpots(r) {
     const s = r.scores[it.i];
     if (!s) continue;
     const k = `${Math.floor(it.x / 400)},${Math.floor(it.z / 400)}`;
-    const c = cells.get(k) || { s: 0, n: 0, x: 0, z: 0 };
+    const c = cells.get(k) || { s: 0, n: 0, x: 0, z: 0, bs: 0 };
     c.s += s; c.n++; c.x += it.x * s; c.z += it.z * s;
+    if (it.bk) c.bs += s;
     cells.set(k, c);
   }
   const spots = new Map();
   for (const c of [...cells.values()].sort((a, b) => b.s - a.s)) {
     const x = c.x / c.s, z = c.z / c.s, { name, near } = nearest(x, z);
     const sp = spots.get(name);
-    if (sp) { sp.share += c.s / r.total; sp.n += c.n; } else spots.set(name, { x, z, share: c.s / r.total, n: c.n, name, near, unit: "bldg" });
+    if (sp) { sp.share += c.s / r.total; sp.n += c.n; } else spots.set(name, { x, z, share: c.s / r.total, n: c.n, name, near, unit: "bldg", bunker: c.bs > c.s / 2 });
   }
   // events: one row per event type (its sites are random), flying to all of them
   loot.data.events.forEach((e, k) => {
@@ -1116,11 +1900,33 @@ async function runLoot(q) {
   lootClear.hidden = false;
   const t0 = performance.now();
   const r = lootScores(data, pred);
+  if (label === BUNKER_Q) {
+    // only the bunkers: drop every other building and the events
+    r.total = r.max = r.evMax = 0;
+    buildingLayer._items.forEach((it) => {
+      if (!it.bk) r.scores[it.i] = 0;
+      r.total += r.scores[it.i];
+      r.max = Math.max(r.max, r.scores[it.i]);
+    });
+    r.ev = r.ev.map((e) => e.map(() => 0));
+  }
   Object.assign(loot, { scores: r.scores, ev: r.ev, total: r.total, sums: r.sums, label: label.replace(/^All /, "") });
   if (loot.heat) loot.heat.remove();
   loot.heat = null;
   let html = "";
-  if (chosen.length === 1) {
+  if (label === BUNKER_Q) {
+    // what the bunkers give together: the most likely items over all of them
+    const sum = new Map();
+    for (const it of buildingLayer._items) {
+      if (!it.bk) continue;
+      for (const [x, v] of buildingItems(data, it.i, it.ti)) sum.set(x, (sum.get(x) || 0) + v);
+    }
+    const tot = [...sum.values()].reduce((a, b) => a + b, 0);
+    const n = buildingLayer._items.filter((it) => it.bk).length;
+    html += `<p class="hint">${n} bunkers · about ${Math.round(tot)} items when all are full. Most likely finds:</p>` +
+      `<ol class="loot-items">${[...sum].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([x, v]) =>
+        `<li><span>${esc(x[7] || x[0])}</span><b>${(100 * v / tot).toFixed(1)}%</b></li>`).join("")}</ol>`;
+  } else if (chosen.length === 1) {
     const it = chosen[0];
     const flags = (mask, list) => list.filter((n, i) => mask & (1 << i));
     const tiers = flags(it[4], data.values).map((v) => v.replace("Tier", "T")).join(" ") || "any tier";
@@ -1144,7 +1950,7 @@ async function runLoot(q) {
     loot.heat = L.imageOverlay(heatImage(r.scores, r.ev), bounds, { pane: "heat", opacity: heatOpacity(), interactive: false, className: "heat" }).addTo(map);
     const spots = await topSpots(r);
     html += `<ol class="spots">${spots.map((s, i) => `<li><button data-i="${i}"${s.event ? ' class="ev"' : ""}>` +
-      `<span>${s.near ? "near " : ""}${esc(s.name)}</span>` +
+      `<span>${s.near ? "near " : ""}${esc(s.name)}${s.bunker ? " (bunker)" : ""}</span>` +
       `<span class="count">${(s.share * 100).toFixed(1)}% · ${s.n} ${s.unit}</span></button></li>`).join("")}</ol>` +
       `<div class="legend"><span>less</span><i></i><span>more</span></div>`;
     lootRes.innerHTML = html + LOOT_NOTE;
@@ -1172,9 +1978,7 @@ buildingLayer.setDotStyle((it, ci) => {
   const c = proto && proto[1][ci];
   if (!c) return "#ffffff";
   if (loot.sums) return loot.sums(c[0], c[1], data.bu[it.i], data.bt[it.i], 0)[0] ? "#7cfc00" : DIM_DOT;
-  if (c[1] & (1 << data.tags.indexOf("shelves"))) return "#7fd3ff";
-  if (c[0] === 1 << data.cats.indexOf("weapons")) return "#ff9f43";
-  return "#ffffff";
+  return DOT_KINDS[dotKind(c)][1];
 });
 
 lootInput.addEventListener("focus", lootData, { once: true });
@@ -1191,8 +1995,15 @@ map.on("click", (e) => {
   coordsEl.textContent = coordText(lng, lat);
   const pt = pointLayer.hitTest(e.latlng);
   const hit = !pt && buildingLayer.hitTest(e.latlng);
-  const html = pt ? popupHtml(pt.info) : hit ? buildingPopupHtml(hit) : `<div class="sub">${coordText(lng, lat)}</div>`;
-  L.popup().setLatLng(pt ? [pt.z, pt.x] : e.latlng).setContent(html).openOn(map);
+  if (hit) return openBuildingPopup(hit, e.latlng);
+  L.popup({ autoPanPadding: [16, 16] }).setLatLng(pt ? [pt.z, pt.x] : e.latlng)
+    .setContent(pt ? popupHtml(pt.info) : `<div class="sub">${coordText(lng, lat)}</div>`).openOn(map);
+});
+map.on("popupclose", () => buildingLayer.select(null));
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (!catalog.el.hidden) closeCatalog();
+  else if (buildingLayer._hiType != null) buildingLayer.highlightType(null);
 });
 map.on("moveend", writeHash);
 
@@ -1235,5 +2046,5 @@ loadData("loot").then(() => lootData()).then(() => buildingLayer.redraw()); // p
 loadData("shapes").then((shapes) => buildingLayer.setShapes(shapes));
 for (const key of [...enabled]) {
   if (!layers[key]) enabled.delete(key);
-  else if (!layers[key].group.buildings) setEnabled(key, true);
+  else if (!layers[key].group.buildings && !layers[key].group.bunkers) setEnabled(key, true);
 }

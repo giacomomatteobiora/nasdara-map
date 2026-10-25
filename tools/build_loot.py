@@ -2,7 +2,7 @@
 
 {"cats": [...], "tags": [...], "usages": [...], "values": [...],     (bit i of a mask = list entry i)
  "items": [[class, catIndex, nominal, usageMask, valueMask, tagMask, deloot, displayName], ...],  (nominal > 0)
- "protos": {"<buildings.json type index>": [groupLootmax, [[catMask, tagMask, points, lootmax], ...]]},
+ "protos": {"<buildings.json type index>": [groupLootmax, [[catMask, tagMask, points, lootmax, name], ...]]},
  "bu": [usageMask per building], "bt": [valueMask per building],   (same order as buildings.json "b")
  "eprotos": [[usageMask, groupLootmax, conts], ...],                (loot groups of event objects)
  "events": [{"e": eventName, "w": spawn chance per position, "pick": "one"|"all",
@@ -81,7 +81,8 @@ def main():
             cm = mask(c.findall("category"), cats)
             points = len(c.findall("point"))
             if cm and points:
-                conts.append([cm, mask(c.findall("tag"), tags), points, int(c.get("lootmax", defaults["container"]))])
+                conts.append([cm, mask(c.findall("tag"), tags), points, int(c.get("lootmax", defaults["container"])),
+                              c.get("name")])
         key = g.get("name").lower()
         group_usage[key] = mask(g.findall("usage"), usages)
         if conts:

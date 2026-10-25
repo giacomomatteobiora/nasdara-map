@@ -152,10 +152,13 @@ void ScanPowerlines()
 	CloseFile(f);
 }
 
-// Top-down silhouette of one instance per building class: rays every 0.5 m over the collision box (model space),
-// a cell is filled when the building's view geometry is among the ray's hits. Also writes the model-space ce_center
-// (CE loot points in mapgroupproto are relative to it; same fallback as Object.GetCenter()).
-// Input $profile:shapes_in.txt: "class x y z". Output per class: "class x0 z0 step nx nz cx cy cz" + nz rows of 0/1.
+// Top-down height map of one instance per building class: rays every 0.5 m over the collision box (model space);
+// each cell gets the model-space height of the highest hit on the building itself (view geometry, proxies included).
+// Also writes the model-space ce_center (CE loot points in mapgroupproto are relative to it; same fallback as
+// Object.GetCenter()) and the model-space ground height under the instance's origin.
+// Input $profile:shapes_in.txt: "class x y z". Output per class: "class x0 z0 step nx nz cx cy cz ground" + nz rows of
+// space-separated decimetres (model y * 10), "." where the ray missed the building, "u" prefix = only found from below
+// the terrain (underground part).
 void ScanShapes()
 {
 	FileHandle inp = OpenFile("$profile:shapes_in.txt", FileMode.READ);
@@ -163,6 +166,7 @@ void ScanShapes()
 	string line;
 	int done = 0;
 	float step = 0.5;
+	array<ref RaycastRVResult> results = new array<ref RaycastRVResult>;
 	while (FGets(inp, line) > 0)
 	{
 		array<string> parts = new array<string>;
@@ -186,14 +190,13 @@ void ScanShapes()
 		vector c = "0 0.2 0";
 		if (o.MemoryPointExists("ce_center"))
 			c = o.GetMemoryPointPos("ce_center");
+		vector op = o.GetPosition();
+		float ground = o.WorldToModel(Vector(op[0], GetGame().SurfaceY(op[0], op[2]), op[2]))[1];
 		float x0 = mm[0][0] - 1;
 		float z0 = mm[0][2] - 1;
 		int nx = Math.Ceil((mm[1][0] - mm[0][0] + 2) / step);
 		int nz = Math.Ceil((mm[1][2] - mm[0][2] + 2) / step);
-		FPrintln(f, parts[0] + " " + x0 + " " + z0 + " " + step + " " + nx + " " + nz + " " + c[0] + " " + c[1] + " " + c[2]);
-		vector hit, dir;
-		int comp;
-		set<Object> res = new set<Object>;
+		FPrintln(f, parts[0] + " " + x0 + " " + z0 + " " + step + " " + nx + " " + nz + " " + c[0] + " " + c[1] + " " + c[2] + " " + ground);
 		for (int iz = 0; iz < nz; iz++)
 		{
 			string row = "";
@@ -203,13 +206,41 @@ void ScanShapes()
 				float lx = x0 + (ix + 0.5) * step;
 				vector top = o.ModelToWorld(Vector(lx, mm[1][1] + 3, lz));
 				vector bottom = o.ModelToWorld(Vector(lx, mm[0][1] - 1, lz));
-				res.Clear();
-				// the ray also hits the ground, so the cell counts only when the building itself is among the hits
-				DayZPhysics.RaycastRV(top, bottom, hit, dir, comp, res, null, null, false, false, ObjIntersectView);
-				if (res.Find(o) != -1)
-					row += "1";
+				// first contact per object; the building itself or one of its proxies, the highest one wins.
+				// The ray stops at the terrain, so cells without a hit get more rays from below the ground (underground
+				// bunker rooms and tunnels). A ray starting less than ~1 m under the surface still hits the terrain first.
+				bool any = false;
+				float best = -100000;
+				int hitPass = 0;
+				for (int pass = 0; pass < 3 && !any; pass++)
+				{
+					vector from = top;
+					if (pass == 1)
+						from = Vector(top[0], GetGame().SurfaceY(top[0], top[2]) - 1.0, top[2]);
+					if (pass == 2)
+						from = Vector(top[0], GetGame().SurfaceY(top[0], top[2]) - 2.5, top[2]);
+					RaycastRVParams params = new RaycastRVParams(from, bottom, null);
+					params.type = ObjIntersectView;
+					params.flags = CollisionFlags.ALLOBJECTS;
+					results.Clear();
+					DayZPhysics.RaycastRVProxy(params, results);
+					foreach (RaycastRVResult r : results)
+					{
+						if (r.obj != o && r.parent != o)
+							continue;
+						float y = o.WorldToModel(r.pos)[1];
+						if (!any || y > best)
+							best = y;
+						any = true;
+						hitPass = pass;
+					}
+				}
+				if (any && hitPass > 0)
+					row += "u" + Math.Round(best * 10).ToString() + " ";
+				else if (any)
+					row += Math.Round(best * 10).ToString() + " ";
 				else
-					row += "0";
+					row += ". ";
 			}
 			FPrintln(f, row);
 		}
@@ -217,6 +248,68 @@ void ScanShapes()
 	}
 	FPrintln(f, "SCAN_DONE " + done);
 	CloseFile(inp);
+	CloseFile(f);
+}
+
+// Road map: 8192 x 8192 cells at 2 m (cell centres), rows north -> south. Per cell: the surface found just above
+// the road surface height (road objects / building floors) and whether that surface sits above the terrain.
+// Output: "names" line (surface name table), then one line per row of run-length pairs "code count", where
+// code = nameIndex * 2 + (raised above terrain ? 1 : 0).
+void ScanRoads()
+{
+	FileHandle f = OpenFile("$profile:roads.txt", FileMode.WRITE);
+	float size = GetGame().GetWorld().GetWorldSize();
+	int n = 8192;
+	float step = size / n;
+	map<string, int> index = new map<string, int>;
+	TStringArray names = {};
+	FPrintln(f, "worldsize " + size + " n " + n);
+	for (int row = 0; row < n; row++)
+	{
+		float z = size - step * (row + 0.5);
+		string chunk = "";
+		int prev = -1;
+		int count = 0;
+		for (int col = 0; col < n; col++)
+		{
+			float x = step * (col + 0.5);
+			float ty = GetGame().SurfaceY(x, z);
+			float ry = GetGame().SurfaceRoadY(x, z);
+			string type;
+			GetGame().SurfaceGetType3D(x, ry + 0.05, z, type);
+			int idx;
+			if (!index.Find(type, idx))
+			{
+				idx = names.Count();
+				names.Insert(type);
+				index.Insert(type, idx);
+			}
+			int code = idx * 2;
+			if (ry > ty + 0.02)
+				code++;
+			if (code == prev)
+			{
+				count++;
+				continue;
+			}
+			if (count)
+				chunk += prev.ToString() + " " + count.ToString() + " ";
+			prev = code;
+			count = 1;
+			if (chunk.Length() > 4000)
+			{
+				FPrint(f, chunk);
+				chunk = "";
+			}
+		}
+		chunk += prev.ToString() + " " + count.ToString();
+		FPrintln(f, chunk);
+	}
+	string all = "";
+	foreach (string nm : names)
+		all += nm + " ";
+	FPrintln(f, "names " + all);
+	FPrintln(f, "SCAN_DONE");
 	CloseFile(f);
 }
 
@@ -250,12 +343,21 @@ void ScanItemNames()
 void main()
 {
 	int t0 = TickCount(0);
-	if (FileExist("$profile:shapes_only"))
+	// $profile:shapes_only / roads_only -> just those scans (the rest is already done)
+	if (FileExist("$profile:shapes_only") || FileExist("$profile:roads_only"))
 	{
-		ScanItemNames();
-		Print("[MAPSCAN] item names done");
-		ScanShapes();
-		Print("[MAPSCAN] shapes done, ticks=" + TickCount(t0));
+		if (FileExist("$profile:shapes_only"))
+		{
+			ScanItemNames();
+			Print("[MAPSCAN] item names done");
+			ScanShapes();
+			Print("[MAPSCAN] shapes done, ticks=" + TickCount(t0));
+		}
+		if (FileExist("$profile:roads_only"))
+		{
+			ScanRoads();
+			Print("[MAPSCAN] roads done, ticks=" + TickCount(t0));
+		}
 		GetGame().RequestExit(0);
 		return;
 	}

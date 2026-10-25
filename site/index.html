@@ -15,7 +15,7 @@
   <button id="panel-toggle" aria-expanded="false" aria-controls="panel">Layers</button>
   <aside id="panel">
     <header>
-      <h1>Nasdara</h1>
+      <div class="head-row"><h1>Nasdara</h1><button id="catalog-open" type="button">Buildings</button></div>
       <div class="base-switch" role="radiogroup" aria-label="Background map">
         <label><input type="radio" name="base" value="sat" checked> Satellite</label>
         <label><input type="radio" name="base" value="paper"> Paper</label>
@@ -36,6 +36,7 @@
   </aside>
 
   <div id="coords">X — · Z —</div>
+  <div id="catalog" role="dialog" aria-modal="true" aria-labelledby="catalog-title" hidden></div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
   <script src="app.js"></script>
